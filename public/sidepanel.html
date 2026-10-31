@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TabRelay · 工作区接力</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">↗</span
+          ><span
+            >TabRelay<span class="brand-caption">WORKSPACE RELAY</span></span
+          >
+        </div>
+        <div class="top-actions">
+          <button
+            id="refresh"
+            class="icon-button"
+            title="刷新设备"
+            aria-label="刷新设备"
+          >
+            ↻</button
+          ><button
+            id="settings-open"
+            class="icon-button"
+            title="设置"
+            aria-label="设置"
+          >
+            ⚙
+          </button>
+        </div>
+      </header>
+      <main>
+        <section class="intro">
+          <div class="eyebrow">你的工作，接着进行</div>
+          <h1>让标签跟上你的节奏。</h1>
+          <p>选择另一台设备，继续未完成的工作。</p>
+        </section>
+        <section id="local-card" class="local-card" aria-label="本机同步状态">
+          <div class="local-top">
+            <span class="device-symbol" aria-hidden="true">▰</span>
+            <div class="grow">
+              <h2 id="local-name">当前设备</h2>
+              <div id="local-count" class="muted">正在读取本机状态…</div>
+            </div>
+            <span id="sync-pill" class="pill">读取中</span>
+          </div>
+          <div class="local-bottom">
+            <span id="sync-time">尚未同步</span
+            ><button id="sync-now" class="text-button" data-testid="sync-now">
+              立即同步 ↗
+            </button>
+          </div>
+          <p id="sync-error" class="inline-error" hidden></p>
+          <button id="reset-id" class="text-button danger" hidden>
+            重新生成设备 ID
+          </button>
+        </section>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <section id="onboarding" class="onboarding" hidden>
+          <span class="onboarding-icon" aria-hidden="true">⇄</span>
+          <h2>连接你的设备</h2>
+          <p>
+            使用自己的 WebDAV 空间同步标签。数据由你掌控，原有窗口始终保留。
+          </p>
+          <button id="onboarding-setup" class="primary">配置 WebDAV</button>
+        </section>
+        <section id="workspace" hidden>
+          <div class="section-heading">
+            <h2>
+              设备工作区 <span id="device-count" class="count-badge">0</span>
+            </h2>
+            <span class="eyebrow">按需接力</span>
+          </div>
+          <div id="device-list" class="device-list" aria-label="设备列表"></div>
+          <div id="empty-devices" class="empty" hidden>
+            还没有远端设备。连接另一台设备后，它会出现在这里。
+          </div>
+          <section id="snapshot-section" hidden>
+            <div class="snapshot-heading">
+              <div>
+                <div class="eyebrow">正在查看</div>
+                <h2 id="snapshot-name"></h2>
+              </div>
+              <select id="snapshot-kind" aria-label="快照版本">
+                <option value="current">最新快照</option>
+                <option value="recovery">最近有效恢复点</option>
+              </select>
+            </div>
+            <div class="snapshot-meta">
+              <span id="snapshot-time"></span
+              ><span id="snapshot-revision"></span>
+            </div>
+            <div class="selection-toolbar">
+              <label
+                ><input type="checkbox" id="select-all" checked /> 全选</label
+              ><span id="selection-count"></span>
+            </div>
+            <div id="window-list"></div>
+            <div class="restore-footer">
+              <label class="extra-dedup"
+                ><input type="checkbox" id="extra-dedup" /> 额外按 URL 去重
+                <span class="muted">（默认关闭）</span></label
+              ><button
+                id="preview-restore"
+                class="primary wide"
+                data-testid="preview-restore"
+              >
+                预览恢复
+              </button>
+              <p class="safe-caption">＋ 新窗口追加 · 不关闭本机已有标签</p>
+            </div>
+          </section>
+        </section>
+        <section
+          id="operation-card"
+          class="operation-card"
+          hidden
+          aria-live="polite"
+        >
+          <div class="section-heading">
+            <h2 id="operation-title">恢复进度</h2>
+            <span id="operation-status" class="pill"></span>
+          </div>
+          <div class="progress-track">
+            <div id="operation-progress" class="progress-fill"></div>
+          </div>
+          <p id="operation-detail"></p>
+          <p id="operation-error" class="inline-error" hidden></p>
+          <div id="operation-actions" class="button-row">
+            <button id="cancel-restore" class="secondary">停止后续创建</button
+            ><button id="resume-restore" class="secondary">继续恢复</button
+            ><button id="undo-restore" class="text-button danger">
+              撤销本次恢复
+            </button>
+          </div>
+        </section>
+        <footer class="app-footer">
+          <span class="footer-dot"></span> 设备独立同步 · 私密窗口不采集
+        </footer>
+      </main>
+    </div>
+    <dialog id="settings-dialog">
+      <form id="settings-form">
+        <div class="dialog-heading">
+          <div>
+            <div class="eyebrow">CONNECTION & PRIVACY</div>
+            <h2>同步设置</h2>
+          </div>
+          <button
+            type="button"
+            id="settings-close"
+            class="icon-button"
+            aria-label="关闭设置"
+          >
+            ×
+          </button>
+        </div>
+        <label class="field"
+          >设备名称<input
+            id="device-name"
+            name="deviceName"
+            required
+            maxlength="80"
+            placeholder="例如：我的工作电脑" /></label
+        ><label class="field"
+          >WebDAV 地址<input
+            id="endpoint"
+            name="endpoint"
+            required
+            type="url"
+            placeholder="https://dav.example.com/remote.php/dav/files/me/"
+        /></label>
+        <p class="field-hint">
+          必须使用 HTTPS。TabRelay 会在此目录下创建 tabrelay/v1。
+        </p>
+        <div class="field-grid">
+          <label class="field"
+            >用户名<input
+              id="username"
+              name="username"
+              autocomplete="username" /></label
+          ><label class="field"
+            >应用专用密码<input
+              id="password"
+              name="password"
+              type="password"
+              autocomplete="new-password"
+              placeholder="WebDAV 应用专用密码"
+          /></label>
+        </div>
+        <label class="toggle-line"
+          ><input id="enabled" type="checkbox" />
+          自动同步本机所有普通窗口</label
+        >
+        <details class="privacy-settings">
+          <summary>隐私与保留策略</summary>
+          <label class="field"
+            >不采集的域名<textarea
+              id="blacklist"
+              rows="2"
+              placeholder="bank.example.com&#10;internal.example.com"
+            ></textarea>
+          </label>
+          <p class="field-hint">每行一个域名，同时排除其子域名。</p>
+          <label class="field"
+            >移除的 URL 查询参数<input
+              id="strip-params"
+              placeholder="token, access_token, code" /></label
+          ><label class="field"
+            >历史快照保留数<input
+              id="history-limit"
+              type="number"
+              min="1"
+              max="100"
+              value="20" /></label
+          ><label class="field"
+            >快照加密口令（可选）<input
+              id="encryption-passphrase"
+              type="password"
+              autocomplete="new-password"
+              placeholder="所有设备使用相同口令"
+          /></label>
+          <p class="field-hint">
+            启用后使用 AES-GCM
+            加密快照。口令保存在本机受信任扩展存储中；遗失后无法读取加密快照。设备名称与同步时间仍为明文。首次成功发布后不可在同一目录更换口令；如需更换，请使用新的
+            WebDAV 目录。
+          </p>
+        </details>
+        <div class="privacy-note">
+          标签 URL 可能包含登录令牌等敏感信息。请使用可信
+          WebDAV，并配置需要移除的参数。不会同步
+          Cookie、表单、页面内容或无痕窗口。
+        </div>
+        <p id="settings-error" class="inline-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button type="button" id="test-connection" class="secondary">
+            测试连接</button
+          ><button type="submit" id="save-settings" class="primary">
+            保存设置
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="restore-dialog">
+      <div class="dialog-heading">
+        <div>
+          <div class="eyebrow">READY TO RELAY</div>
+          <h2>确认恢复到新窗口</h2>
+        </div>
+        <button
+          id="restore-close"
+          class="icon-button"
+          aria-label="关闭恢复预览"
+        >
+          ×
+        </button>
+      </div>
+      <p id="plan-source" class="muted"></p>
+      <div id="plan-stats" class="plan-stats"></div>
+      <p id="plan-existing" class="preserve-note"></p>
+      <div id="plan-skipped" class="skipped-list"></div>
+      <p class="field-hint">
+        使用本次预览固定的快照版本。恢复后会重新采集本机实际状态，并自动同步合并结果。
+      </p>
+      <div class="dialog-actions">
+        <button id="restore-back" class="secondary">返回</button
+        ><button
+          id="confirm-restore"
+          class="primary"
+          data-testid="confirm-restore"
+        >
+          确认新增窗口
+        </button>
+      </div>
+    </dialog>
+    <dialog id="confirm-dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-description"></p>
+      <div class="dialog-actions">
+        <button id="confirm-no" class="secondary">取消</button
+        ><button id="confirm-yes" class="primary">确认</button>
+      </div>
+    </dialog>
+    <script src="sidepanel.js" type="module"></script>
+  </body>
+</html>

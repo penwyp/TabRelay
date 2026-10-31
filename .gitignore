@@ -1,0 +1,9 @@
+node_modules/
+dist/
+playwright-report/
+test-results/
+*.zip
+*.pem
+*.key
+.e2e-profiles/
+dist-test/
