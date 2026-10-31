@@ -1358,6 +1358,7 @@ try {
     const options = await e.context.newPage();
     await options.goto(`chrome-extension://${e.id}/options.html`);
     await options.locator("#settings-fields:not([disabled])").waitFor();
+    await options.locator("#content-settings > summary").click();
     await options.locator("#content-enabled").waitFor();
     assert.equal(await options.locator("#content-enabled").isChecked(), false);
     assert.deepEqual(
@@ -1368,6 +1369,10 @@ try {
     );
     await options.locator("#content-origins").fill(dav.origin);
     await options.locator("#content-enabled").check();
+    await options.screenshot({
+      path: "evidence/screenshots/12-body-origin-consent-settings.png",
+      fullPage: true,
+    });
     await options.locator("#save-settings").click();
     await eventually(
       async () => (await e.call({ type: "GET_STATE" })).settings.contentEnabled,
