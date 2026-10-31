@@ -1433,6 +1433,34 @@ try {
     await popup.locator("#search-query").fill("量子陀螺导航");
     await popup.locator("#search-submit").click();
     await popup.locator(".search-result").first().waitFor();
+    assert.equal(
+      await popup.locator("#source-details").getAttribute("open"),
+      null,
+      "Coverage caveats must be visible without expanding diagnostics",
+    );
+    assert.equal(await popup.locator("#coverage-warning").isVisible(), true);
+    assert.ok(
+      (await popup.locator("#coverage-warning").textContent()).includes(
+        "正文已载",
+      ),
+    );
+    assert.ok(
+      (await popup.locator("#coverage-warning").textContent()).includes(
+        "不可用",
+      ),
+    );
+    assert.ok(
+      (await popup.locator("#coverage-badge").textContent()).includes(
+        "正文部分覆盖",
+      ),
+    );
+    assert.equal(
+      await popup
+        .locator("#coverage-badge")
+        .evaluate((element) => element.classList.contains("complete")),
+      false,
+      "Missing body coverage must never present as fully complete/green",
+    );
     const firstResult = popup.locator(".search-result").first();
     await firstResult.locator(".result-snippet").waitFor();
     const viewport = await popup.evaluate(() => ({

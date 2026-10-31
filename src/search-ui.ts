@@ -196,6 +196,8 @@ function renderCoverage(value: Coverage) {
   const notLoaded = value.sources.filter(
     (source) => source.status === "not-loaded",
   );
+  const partialBody =
+    (value.bodyMissing || 0) > 0 || (value.bodyTruncated || 0) > 0;
   const label = value.paused
     ? "已暂停自动构建"
     : value.loading
@@ -209,7 +211,9 @@ function renderCoverage(value: Coverage) {
             : failed.length || notLoaded.length || retainedErrors.length
               ? "部分范围"
               : loaded.length
-                ? "已加载"
+                ? partialBody
+                  ? "正文部分覆盖"
+                  : "已加载"
                 : "未加载";
   text("coverage-badge", label);
   $("coverage-badge").classList.toggle(
@@ -222,6 +226,7 @@ function renderCoverage(value: Coverage) {
       !failed.length &&
       !retainedErrors.length &&
       !notLoaded.length &&
+      !partialBody &&
       loaded.length > 0,
   );
   $("coverage-badge").classList.toggle(
@@ -232,7 +237,8 @@ function renderCoverage(value: Coverage) {
       value.truncated ||
       failed.length > 0 ||
       retainedErrors.length > 0 ||
-      notLoaded.length > 0,
+      notLoaded.length > 0 ||
+      partialBody,
   );
   text(
     "coverage-summary",
@@ -286,7 +292,11 @@ function renderCoverage(value: Coverage) {
       ? "部分来源刷新失败，保留了此前已加载的缓存；这些内容可能过时。"
       : undefined,
   ].filter(Boolean);
+  const bodyWarning = partialBody
+    ? `正文已载 ${value.bodyLoaded || 0} · 不可用 ${value.bodyMissing || 0} · 截断 ${value.bodyTruncated || 0}；标题/网址仍可搜。`
+    : undefined;
   const popupWarnings = [
+    bodyWarning,
     value.error,
     value.paused ? "自动构建已暂停；点击“重建搜索缓存”继续。" : undefined,
     value.truncated ? "已达加载上限，覆盖不完整。" : undefined,
@@ -298,13 +308,13 @@ function renderCoverage(value: Coverage) {
     "coverage-warning",
     document.body.classList.contains("popup-workbench")
       ? popupWarnings.join(" ")
-      : warnings.join(" "),
+      : [...warnings, bodyWarning].filter(Boolean).join(" "),
   );
   show(
     "coverage-warning",
     document.body.classList.contains("popup-workbench")
       ? popupWarnings.length > 0
-      : warnings.length > 0,
+      : warnings.length > 0 || partialBody,
   );
   const sourceList = $("source-list");
   sourceList.replaceChildren();
