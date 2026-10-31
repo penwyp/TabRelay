@@ -1249,6 +1249,7 @@ try {
     );
   });
   await test("Clearing local search pauses automatic reload across popup reopen until rebuild", async () => {
+    await searchPage.locator("#source-details > summary").click();
     await searchPage.locator("#clear-cache").click();
     await eventually(
       async () =>
@@ -1432,6 +1433,61 @@ try {
     await popup.locator("#search-query").fill("量子陀螺导航");
     await popup.locator("#search-submit").click();
     await popup.locator(".search-result").first().waitFor();
+    const firstResult = popup.locator(".search-result").first();
+    await firstResult.locator(".result-snippet").waitFor();
+    const viewport = await popup.evaluate(() => ({
+      width: innerWidth,
+      height: innerHeight,
+      scrollX,
+      scrollY,
+      documentWidth: document.documentElement.scrollWidth,
+    }));
+    assert.deepEqual([viewport.width, viewport.height], [600, 600]);
+    assert.equal(
+      viewport.scrollY,
+      0,
+      "Search result must be useful in initial popup viewport without scrolling",
+    );
+    assert.equal(viewport.scrollX, 0);
+    assert.ok(
+      viewport.documentWidth <= viewport.width,
+      JSON.stringify(viewport),
+    );
+    const visibleBoxes = {};
+    for (const selector of [".result-title", ".result-snippet"]) {
+      const box = await firstResult.locator(selector).boundingBox();
+      assert.ok(
+        box &&
+          box.width > 0 &&
+          box.height > 0 &&
+          box.x >= 0 &&
+          box.y >= 0 &&
+          box.x + box.width <= 600 &&
+          box.y + box.height <= 600,
+        "First result title and body excerpt must fit in the unscrolled 600×600 popup: " +
+          selector +
+          " " +
+          JSON.stringify({ box, viewport }),
+      );
+      visibleBoxes[selector] = box;
+    }
+    assert.ok(
+      (await firstResult.locator(".result-snippet").textContent()).includes(
+        "量子陀螺导航",
+      ),
+    );
+    await popup.screenshot({
+      path: "evidence/screenshots/13-popup-body-600x600.png",
+      fullPage: false,
+    });
+    await fs.writeFile(
+      "evidence/popup-viewport.json",
+      JSON.stringify(
+        { viewport, visibleBoxes, firstBodyResultVisible: true },
+        null,
+        2,
+      ),
+    );
     await popup.screenshot({
       path: "evidence/screenshots/10-body-chinese-search.png",
       fullPage: true,

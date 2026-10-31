@@ -119,6 +119,7 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败，请重试。";
 }
 function notice(value: string, error = false) {
+  $("search-notice").dataset.kind = error ? "error" : "action";
   text("search-notice", value);
   $("search-notice").classList.toggle("error", error);
   show("search-notice", true);
@@ -146,7 +147,13 @@ function invalidateView(reason?: string) {
     "索引已更新",
     "请以当前已加载范围重新查询。旧结果与恢复预览已失效。",
   );
-  if (reason) notice(reason);
+  if (reason) {
+    notice(reason);
+    $("search-notice").dataset.kind =
+      reason === "搜索索引已更新，旧结果和恢复预览已清除。"
+        ? "index-update"
+        : "action";
+  }
 }
 function renderEmpty(title: string, detail: string) {
   const box = node("div", "search-empty");
@@ -237,6 +244,12 @@ function renderCoverage(value: Coverage) {
           ? "本机搜索缓存已清空或暂停，远端文件与标签保持不变。请明确点击重建后继续。"
           : "正在自动读取当前快照、恢复点与历史版本；只有成功加载的来源进入搜索。",
   );
+  if (document.body.classList.contains("popup-workbench")) {
+    text(
+      "coverage-summary",
+      `${value.devicesLoaded}/${value.devicesTotal} 台设备 · ${loaded.length} 快照${failed.length ? ` · ${failed.length} 失败` : ""}${retainedErrors.length ? ` · ${retainedErrors.length} 旧缓存` : ""}${notLoaded.length ? ` · ${notLoaded.length} 未加载` : ""}`,
+    );
+  }
   busy("load-snapshots", value.loading || loadRequested || actionPending);
   busy("clear-cache", actionPending);
   show("load-snapshots", !value.paused);
@@ -273,8 +286,26 @@ function renderCoverage(value: Coverage) {
       ? "部分来源刷新失败，保留了此前已加载的缓存；这些内容可能过时。"
       : undefined,
   ].filter(Boolean);
-  text("coverage-warning", warnings.join(" "));
-  show("coverage-warning", warnings.length > 0);
+  const popupWarnings = [
+    value.error,
+    value.paused ? "自动构建已暂停；点击“重建搜索缓存”继续。" : undefined,
+    value.truncated ? "已达加载上限，覆盖不完整。" : undefined,
+    failed.length || retainedErrors.length
+      ? "部分来源失败或沿用旧缓存，详见范围详情。"
+      : undefined,
+  ].filter(Boolean);
+  text(
+    "coverage-warning",
+    document.body.classList.contains("popup-workbench")
+      ? popupWarnings.join(" ")
+      : warnings.join(" "),
+  );
+  show(
+    "coverage-warning",
+    document.body.classList.contains("popup-workbench")
+      ? popupWarnings.length > 0
+      : warnings.length > 0,
+  );
   const sourceList = $("source-list");
   sourceList.replaceChildren();
   if (!value.sources.length)
@@ -514,6 +545,8 @@ function contentLabel(value?: string): string {
   return value ? labels[value] || value : "没有已加载正文";
 }
 function renderResults(response: QueryResponse, query: string) {
+  if ($("search-notice").dataset.kind === "index-update")
+    show("search-notice", false);
   const loaded = response.coverage.sources.filter(
     (source) => source.status === "loaded",
   ).length;
@@ -525,6 +558,17 @@ function renderResults(response: QueryResponse, query: string) {
     "result-explanation",
     `在 ${loaded} 个已加载快照中匹配，相同网址已聚合。先筛选再限量；定位或恢复使用下方选中的具体来源。${response.coverage.loading || response.coverage.cancelled || response.coverage.truncated || response.coverage.sources.some((source) => source.status !== "loaded") ? " 当前覆盖不完整。" : " 结果不是设备的实时标签状态。"}`,
   );
+  if (document.body.classList.contains("popup-workbench")) {
+    text(
+      "result-explanation",
+      response.coverage.loading ||
+        response.coverage.cancelled ||
+        response.coverage.truncated ||
+        response.coverage.sources.some((source) => source.status !== "loaded")
+        ? "仅搜索已加载范围；定位或恢复前选择具体来源。"
+        : "同网址已聚合；定位或恢复前选择具体来源。",
+    );
+  }
   const list = $("search-results");
   list.replaceChildren();
   if (!response.results.length) {
@@ -559,6 +603,8 @@ function renderResults(response: QueryResponse, query: string) {
       node("span", "occurrence-count", `${occurrences.length} 处来源`),
     );
     card.append(heading);
+    const snippetSlot = node("div", "result-snippet-slot");
+    card.append(snippetSlot);
     const choice = node(
       "label",
       "occurrence-selector",
@@ -592,6 +638,7 @@ function renderResults(response: QueryResponse, query: string) {
       card.dataset.tabKey = result.tabKey;
       card.dataset.windowKey = result.windowKey;
       details.replaceChildren();
+      snippetSlot.replaceChildren();
       const meta = node("div", "result-meta");
       meta.append(
         node("span", "result-tag", result.deviceName),
@@ -616,7 +663,7 @@ function renderResults(response: QueryResponse, query: string) {
       if (result.bodySnippet) {
         const snippet = node("p", "result-snippet");
         highlight(snippet, result.bodySnippet, query);
-        details.append(snippet);
+        snippetSlot.append(snippet);
       }
       details.append(
         node(
@@ -901,10 +948,25 @@ async function refreshWorkbenchState() {
       "workbench-sync",
       syncBusy || !settings.endpoint || Boolean(sync.pausedConflict),
     );
+    const syncAlert = document.getElementById("workbench-sync-alert");
+    if (syncAlert) {
+      syncAlert.hidden = !sync.error && !sync.pausedConflict;
+      syncAlert.textContent =
+        sync.error ||
+        (sync.pausedConflict
+          ? "设备身份冲突，同步已暂停，请在设置中检查。"
+          : "");
+    }
     const capture = value.contentCapture;
     contentCaptureSummary = capture
       ? `本机采样 ${capture.sampled} · 跳过 ${capture.skipped} · 失败 ${capture.failed} · 待采样 ${capture.remaining}；此设备远端正文对象（上次同步观察）${capture.objectCount ?? "未知"}/${capture.limit || 1000}。${(capture.objectCount ?? 0) >= 900 ? "已接近上限；清空本机缓存不会释放 WebDAV 空间。" : ""}`
       : "正文采集默认关闭，只有明确授权的站点才可采集。";
+    const capacityWarning = document.getElementById("body-limit-warning");
+    if (capacityWarning) {
+      capacityWarning.hidden = (capture?.objectCount ?? 0) < 900;
+      capacityWarning.textContent =
+        "远端正文接近 1000 个上限；清空本机缓存不会释放 WebDAV 空间。";
+    }
     if (status)
       text(
         "body-coverage",
