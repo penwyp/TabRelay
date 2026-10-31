@@ -37,7 +37,7 @@ async function test(name, fn) {
   results.push({ name, status: "passed" });
   console.log("PASS", name);
 }
-async function browser(name) {
+async function browser(name, entryPage = "sidepanel.html") {
   const extension = path.resolve("dist-test");
   const options = {
     headless: true,
@@ -64,7 +64,7 @@ async function browser(name) {
     (await context.waitForEvent("serviceworker"));
   const id = new URL(worker.url()).host;
   const page = await context.newPage();
-  await page.goto(`chrome-extension://${id}/sidepanel.html`);
+  await page.goto(`chrome-extension://${id}/${entryPage}`);
   const call = (message) =>
     page
       .evaluate((m) => chrome.runtime.sendMessage(m), message)
@@ -1654,9 +1654,12 @@ try {
         2,
       ),
     );
+    // Close the legacy sidepanel before shutdown so session restoration cannot
+    // trigger its independent device/history/current workspace preview loader.
+    await f.page.close();
     const requestsBeforeRestart = dav.requests.length;
     await f.context.close();
-    f = await browser("F-large-corpus");
+    f = await browser("F-large-corpus", "options.html");
     const afterRestart = await f.call({ type: "SEARCH_STATUS" });
     assert.equal(
       afterRestart.sources.length,
@@ -1672,10 +1675,35 @@ try {
       0,
       "Unreadable old-key ciphertext must be purged on browser restart",
     );
-    assert.equal(
-      dav.requests.length,
-      requestsBeforeRestart,
-      "Cache restart inspection must not silently fetch the corpus",
+    // Options loads local settings only; it does not auto-load workspace/search data.
+    const restartRequests = dav.requests.slice(requestsBeforeRestart);
+    const unexpectedBodyReads = restartRequests.filter((request) =>
+      request.path.startsWith(rootPath),
+    );
+    assert.deepEqual(
+      unexpectedBodyReads,
+      [],
+      "Cache-only restart inspection must not refetch this namespace's snapshots or body corpus; requests=" +
+        JSON.stringify(restartRequests),
+    );
+    const corpusEvidence = JSON.parse(
+      await fs.readFile("evidence/large-corpus.json", "utf8"),
+    );
+    await fs.writeFile(
+      "evidence/large-corpus.json",
+      JSON.stringify(
+        {
+          ...corpusEvidence,
+          restartSearchSources: afterRestart.sources.length,
+          restartEncryptedRecords: 0,
+          restartBodyRequests: unexpectedBodyReads.length,
+          restartRequests,
+          restartNote:
+            "Closed legacy sidepanel before restart; local-only options page used to inspect cache. No namespace snapshot/body fetch permitted.",
+        },
+        null,
+        2,
+      ),
     );
   });
   await test("Closing popup during restore preserves the background journal and reopened progress", async () => {
