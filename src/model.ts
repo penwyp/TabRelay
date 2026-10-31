@@ -5,7 +5,6 @@ import type {
   Plan,
   Selection,
 } from "./types";
-declare const __TABRELAY_TEST__: boolean;
 export const LIMITS = {
   bytes: 5_000_000,
   windows: 30,
@@ -259,19 +258,20 @@ export function checkSettings(raw: Settings): Settings {
   if (s.endpoint) {
     const u = new URL(s.endpoint);
     if (
-      (u.protocol !== "https:" &&
-        !(
-          typeof __TABRELAY_TEST__ !== "undefined" &&
-          __TABRELAY_TEST__ &&
-          u.protocol === "http:" &&
-          ["127.0.0.1", "localhost"].includes(u.hostname)
-        )) ||
+      !["https:", "http:"].includes(u.protocol) ||
       u.username ||
       u.password ||
       u.search ||
       u.hash
     )
-      throw Error("WebDAV 必须使用 HTTPS，且地址不能包含凭据、查询或片段");
+      throw Error(
+        "WebDAV 必须使用 HTTP 或 HTTPS，且地址不能包含凭据、查询或片段",
+      );
+    if (u.protocol === "http:" && s.httpAcknowledgedOrigin !== u.origin)
+      throw Error(
+        "HTTP 会明文传输账号、密码与标签数据，请在设置中明确确认此主机的风险",
+      );
+    if (u.protocol === "https:") s.httpAcknowledgedOrigin = undefined;
     s.endpoint = u.href.endsWith("/") ? u.href : u.href + "/";
   } else if (s.enabled) throw Error("请先配置 WebDAV 地址");
   if (

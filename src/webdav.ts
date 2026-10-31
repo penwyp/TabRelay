@@ -1,7 +1,5 @@
 import type { Device, Settings, Snapshot } from "./types";
 
-declare const __TABRELAY_TEST__: boolean;
-
 const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_DIRECTORY_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT = 15_000;
@@ -74,21 +72,19 @@ async function keyFor(
   );
 }
 
-/** HTTPS endpoint must be provided by trusted local settings, never a snapshot. */
-export function normalizeEndpoint(value: string): string {
+/** Endpoint and HTTP consent must come from trusted local settings, never a snapshot. */
+export function normalizeEndpoint(
+  value: string,
+  httpAcknowledgedOrigin?: string,
+): string {
   let endpoint: URL;
   try {
     endpoint = new URL(value);
   } catch {
-    return fail("configuration", "请输入完整的 HTTPS WebDAV 地址。");
+    return fail("configuration", "请输入完整的 HTTP 或 HTTPS WebDAV 地址。");
   }
-  const testLoopback =
-    typeof __TABRELAY_TEST__ !== "undefined" &&
-    __TABRELAY_TEST__ &&
-    endpoint.protocol === "http:" &&
-    ["127.0.0.1", "localhost"].includes(endpoint.hostname);
   if (
-    (!testLoopback && endpoint.protocol !== "https:") ||
+    !["http:", "https:"].includes(endpoint.protocol) ||
     endpoint.username ||
     endpoint.password ||
     endpoint.search ||
@@ -96,7 +92,15 @@ export function normalizeEndpoint(value: string): string {
   )
     fail(
       "configuration",
-      "WebDAV 仅支持 HTTPS，地址不能包含凭据、查询参数或片段。",
+      "WebDAV 仅支持 HTTP 和 HTTPS，地址不能包含凭据、查询参数或片段。",
+    );
+  if (
+    endpoint.protocol === "http:" &&
+    endpoint.origin !== httpAcknowledgedOrigin
+  )
+    fail(
+      "http-consent-required",
+      "HTTP 会明文传输 WebDAV 凭据和数据；请先明确确认此服务器地址的风险，或改用 HTTPS。",
     );
   if (/%2f|%5c/i.test(endpoint.pathname))
     fail("configuration", "WebDAV 地址不能包含编码路径分隔符。");
@@ -191,7 +195,10 @@ export class WebDAVRepository {
     private readonly settings: Settings,
     options: { timeoutMs?: number } = {},
   ) {
-    this.endpoint = normalizeEndpoint(settings.endpoint);
+    this.endpoint = normalizeEndpoint(
+      settings.endpoint,
+      settings.httpAcknowledgedOrigin,
+    );
     this.root = `${this.endpoint}tabrelay/v1/`;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT;
     if (settings.username.includes(":"))
@@ -216,6 +223,16 @@ export class WebDAVRepository {
       url.password
     )
       fail("configuration", "拒绝向配置范围以外发送 WebDAV 请求。");
+    // Recheck consent before every request, including if settings were revoked
+    // while this repository instance was alive. Consent never carries to redirects.
+    if (
+      url.protocol === "http:" &&
+      url.origin !== this.settings.httpAcknowledgedOrigin
+    )
+      fail(
+        "http-consent-required",
+        "此 HTTP 服务器尚未确认明文传输风险，已阻止网络请求。",
+      );
     const headers: Record<string, string> = { ...options.headers };
     if (this.settings.username || this.settings.password)
       headers.Authorization = `Basic ${bytesToBase64(encoder.encode(`${this.settings.username}:${this.settings.password}`))}`;
@@ -246,7 +263,10 @@ export class WebDAVRepository {
         if (response.status === 404)
           fail("not-found", "远端快照或目录不存在。");
         if (response.status >= 300 && response.status < 400)
-          fail("redirect", "WebDAV 重定向被拒绝，请使用最终 HTTPS 地址。");
+          fail(
+            "redirect",
+            "WebDAV 重定向被拒绝，请使用最终服务器地址并重新确认 HTTP 风险（如适用）。",
+          );
         fail("http", `WebDAV 请求失败（HTTP ${response.status}），可重试。`);
       }
       const maxBytes = options.maxBytes ?? MAX_BYTES;
@@ -294,7 +314,7 @@ export class WebDAVRepository {
       // Browser fetch errors may contain URLs or server text. Never expose them.
       fail(
         "network",
-        "WebDAV 连接失败。请检查网络、HTTPS 证书及最终服务器地址；重定向不会被跟随。",
+        "WebDAV 连接失败。请检查网络、服务器地址及 HTTPS 证书（如适用）；重定向不会被跟随。",
       );
     } finally {
       clearTimeout(timeout);

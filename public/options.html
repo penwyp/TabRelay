@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TabRelay · 同步设置</title>
+    <link rel="icon" href="icons/icon-32.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="options-body">
+    <header class="options-topbar">
+      <div class="brand">
+        <img
+          class="brand-icon"
+          src="icons/icon-48.png"
+          width="36"
+          height="36"
+          alt=""
+        /><span
+          >TabRelay<span class="brand-caption">WORKSPACE RELAY</span></span
+        >
+      </div>
+      <span class="settings-page-label">设置</span>
+    </header>
+    <main class="options-layout">
+      <aside class="options-intro">
+        <div class="eyebrow">YOUR SPACE. YOUR CONTROL.</div>
+        <h1>连接一次，<br />随处接力。</h1>
+        <p>用自己的 WebDAV 空间，连接不同设备上的浏览器工作区。</p>
+        <div class="options-principles">
+          <div>
+            <span>01</span><strong>设备独立发布</strong>
+            <p>每台设备保留自己的工作区快照。</p>
+          </div>
+          <div>
+            <span>02</span><strong>主动选择恢复</strong>
+            <p>只在你确认后新增窗口，不覆盖已有标签。</p>
+          </div>
+          <div>
+            <span>03</span><strong>数据由你掌控</strong>
+            <p>不读取网页内容，不同步 Cookie 或无痕窗口。</p>
+          </div>
+        </div>
+      </aside>
+      <section class="options-card" aria-label="同步设置">
+        <div class="options-card-heading">
+          <h2>同步设置</h2>
+          <p class="muted">仅向你指定的 WebDAV 主机申请访问权限。</p>
+        </div>
+        <form id="settings-form">
+          <fieldset id="settings-fields" disabled>
+            <label class="field"
+              >设备名称<input
+                id="device-name"
+                name="deviceName"
+                required
+                maxlength="80"
+                placeholder="例如：我的工作电脑"
+            /></label>
+            <label class="field"
+              >WebDAV 地址<input
+                id="endpoint"
+                name="endpoint"
+                required
+                type="url"
+                placeholder="https://dav.example.com/remote.php/dav/files/me/"
+                aria-describedby="endpoint-hint"
+            /></label>
+            <p id="endpoint-hint" class="field-hint">
+              推荐 HTTPS。TabRelay 会在此目录下创建 tabrelay/v1；不接受 URL
+              中的用户名、密码、查询参数或片段。
+            </p>
+            <div id="http-risk" class="http-risk" hidden>
+              <strong>此连接使用未加密的 HTTP</strong>
+              <p>
+                WebDAV
+                用户名、应用密码及请求会以明文传输，网络中的其他人可能截获或篡改。即使启用快照加密，登录凭据仍不受保护。建议只在可信隔离网络中使用。
+              </p>
+              <p>当前主机：<span id="http-origin"></span></p>
+              <label
+                ><input type="checkbox" id="http-acknowledged" />
+                我了解明文传输风险，仍允许此 HTTP 配置。</label
+              >
+              <p class="field-hint">修改 WebDAV 地址后必须重新确认。</p>
+            </div>
+            <div class="field-grid">
+              <label class="field"
+                >用户名<input
+                  id="username"
+                  name="username"
+                  autocomplete="username" /></label
+              ><label class="field"
+                >应用专用密码<input
+                  id="password"
+                  name="password"
+                  type="password"
+                  autocomplete="new-password"
+                  placeholder="WebDAV 应用专用密码"
+              /></label>
+            </div>
+            <label class="toggle-line"
+              ><input id="enabled" type="checkbox" />
+              自动同步本机所有普通窗口</label
+            >
+            <details class="privacy-settings">
+              <summary>隐私与保留策略</summary>
+              <label class="field"
+                >不采集的域名<textarea
+                  id="blacklist"
+                  rows="3"
+                  placeholder="bank.example.com&#10;internal.example.com"
+                ></textarea>
+              </label>
+              <p class="field-hint">每行一个域名，同时排除其子域名。</p>
+              <label class="field"
+                >移除的 URL 查询参数<input
+                  id="strip-params"
+                  placeholder="token, access_token, code" /></label
+              ><label class="field"
+                >历史快照保留数<input
+                  id="history-limit"
+                  type="number"
+                  min="1"
+                  max="100"
+                  value="20" /></label
+              ><label class="field"
+                >快照加密口令（可选）<input
+                  id="encryption-passphrase"
+                  type="password"
+                  autocomplete="new-password"
+                  placeholder="所有设备使用相同口令"
+              /></label>
+              <p class="field-hint">
+                使用 AES-GCM
+                加密快照。口令保存在本机受信任扩展存储中；遗失后无法读取加密快照。设备名称与同步时间仍为明文。首次成功发布后不可在同一目录更换口令；如需更换，请使用新的
+                WebDAV 目录。
+              </p>
+            </details>
+            <div class="privacy-note">
+              标签 URL 可能包含登录令牌等敏感信息。请使用可信
+              WebDAV，并配置需要移除的参数。不会同步
+              Cookie、表单、页面内容或无痕窗口。
+            </div>
+          </fieldset>
+          <p
+            id="settings-error"
+            class="settings-feedback"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></p>
+          <div class="options-actions">
+            <button
+              type="button"
+              id="test-connection"
+              class="secondary"
+              disabled
+            >
+              测试连接</button
+            ><button type="submit" id="save-settings" class="primary" disabled>
+              保存设置
+            </button>
+          </div>
+        </form>
+      </section>
+    </main>
+    <footer class="options-footer">TabRelay · 浏览器工作区接力</footer>
+    <script src="options.js" type="module"></script>
+  </body>
+</html>

@@ -1,4 +1,4 @@
-/** Real Chromium + actual HTTP WebDAV fixture. Test build alone permits loopback HTTP. */
+/** Real Chromium + HTTP WebDAV fixture with explicit user-equivalent origin consent. */
 import { chromium } from "playwright";
 import { startDav } from "./dav-server.mjs";
 import fs from "node:fs/promises";
@@ -123,6 +123,7 @@ async function configured(b, name) {
     settings: {
       ...s.settings,
       endpoint: dav.endpoint,
+      httpAcknowledgedOrigin: dav.origin,
       deviceName: name,
       enabled: true,
       historyLimit: 5,
@@ -150,6 +151,105 @@ const current = (id) =>
 try {
   const a = await browser("A");
   let b = await browser("B");
+  let optionsPage;
+  await test("Settings opens in a dedicated tab and extension icons decode", async () => {
+    const opened = a.context.waitForEvent("page");
+    await a.page.locator("#settings-open").click();
+    optionsPage = await opened;
+    await optionsPage.waitForURL(`chrome-extension://${a.id}/options.html`);
+    await optionsPage.locator("#settings-fields:not([disabled])").waitFor();
+    assert.notEqual(optionsPage, a.page);
+    assert.ok(a.page.url().endsWith("/sidepanel.html"));
+    const icons = await optionsPage.evaluate(async () => {
+      const manifest = chrome.runtime.getManifest();
+      const dimensions = [];
+      for (const [size, file] of Object.entries(manifest.icons)) {
+        const image = new Image();
+        image.src = chrome.runtime.getURL(file);
+        await image.decode();
+        dimensions.push({
+          size: Number(size),
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        });
+      }
+      return {
+        dimensions,
+        options: manifest.options_ui,
+        action: manifest.action.default_icon,
+      };
+    });
+    assert.equal(icons.options.open_in_tab, true);
+    for (const icon of icons.dimensions)
+      assert.deepEqual([icon.width, icon.height], [icon.size, icon.size]);
+    assert.equal(icons.dimensions.length, 4);
+    assert.ok(icons.action[16] && icons.action[32]);
+  });
+  await test("HTTP settings require explicit consent and HTTPS saves without insecure warning", async () => {
+    await optionsPage.locator("#endpoint").fill(dav.endpoint);
+    await optionsPage.locator("#device-name").fill("工作电脑 A");
+    await optionsPage.locator("#enabled").uncheck();
+    assert.equal(await optionsPage.locator("#http-risk").isVisible(), true);
+    assert.equal(
+      await optionsPage.locator("#http-acknowledged").isChecked(),
+      false,
+    );
+    await optionsPage.locator("#save-settings").click();
+    await eventually(async () =>
+      (await optionsPage.locator("#settings-error").textContent()).includes(
+        "明确勾选",
+      ),
+    );
+    assert.equal((await a.call({ type: "GET_STATE" })).settings.endpoint, "");
+    await optionsPage.locator("#http-acknowledged").check();
+    await optionsPage.locator("#save-settings").click();
+    await eventually(async () =>
+      (await optionsPage.locator("#settings-error").textContent()).includes(
+        "设置已保存",
+      ),
+    );
+    let state = await a.call({ type: "GET_STATE" });
+    assert.equal(state.settings.httpAcknowledgedOrigin, dav.origin);
+    assert.equal(state.settings.enabled, false);
+    await optionsPage.screenshot({
+      path: "evidence/screenshots/05-http-settings-consent.png",
+      fullPage: true,
+    });
+    await optionsPage
+      .locator("#endpoint")
+      .fill(dav.endpoint.replace("127.0.0.1", "localhost"));
+    assert.equal(
+      await optionsPage.locator("#http-acknowledged").isChecked(),
+      false,
+    );
+    await optionsPage.locator("#save-settings").click();
+    await eventually(async () =>
+      (await optionsPage.locator("#settings-error").textContent()).includes(
+        "明确勾选",
+      ),
+    );
+    assert.equal(
+      (await a.call({ type: "GET_STATE" })).settings.endpoint,
+      dav.endpoint,
+    );
+    const httpsEndpoint = dav.endpoint.replace("http:", "https:");
+    await optionsPage.locator("#endpoint").fill(httpsEndpoint);
+    assert.equal(await optionsPage.locator("#http-risk").isVisible(), false);
+    await optionsPage.locator("#save-settings").click();
+    await eventually(async () =>
+      (await optionsPage.locator("#settings-error").textContent()).includes(
+        "设置已保存",
+      ),
+    );
+    state = await a.call({ type: "GET_STATE" });
+    assert.equal(state.settings.endpoint, httpsEndpoint);
+    assert.equal(state.settings.enabled, false);
+    await optionsPage.screenshot({
+      path: "evidence/screenshots/06-https-settings.png",
+      fullPage: true,
+    });
+    await optionsPage.close();
+  });
   await populate(a, [
     ["AI-Research", "Agent-Architecture", "Resource-Cost"],
     ["Weekend-Cycling", "Route-Plan"],
@@ -175,6 +275,16 @@ try {
       color: "blue",
       collapsed: true,
     });
+    await chrome.tabs.update(tabs[0].id, { active: true });
+    const second = windows.find((item) =>
+      item.tabs?.some((t) => t.url?.includes("Weekend-Cycling")),
+    );
+    const secondTabs = second.tabs.filter((t) => t.url?.includes("/fixture/"));
+    for (const tab of secondTabs)
+      await chrome.tabs.update(tab.id, { pinned: true });
+    await chrome.tabs.update(secondTabs[secondTabs.length - 1].id, {
+      active: true,
+    });
   });
   const sa = await configured(a, "工作电脑 A"),
     sb = await configured(b, "个人电脑 B");
@@ -196,6 +306,80 @@ try {
     );
   });
   const originalSource = JSON.stringify(source);
+  await test("Group-only selection restores one window with only group members", async () => {
+    const c = await browser("C-group-only");
+    const selected = structuredClone(source);
+    selected.snapshotId = "group-only-expanded-fixture";
+    const sourceWindow = selected.windows.find((w) => w.groups.length);
+    const selectedGroup = sourceWindow.groups[0];
+    // An all-group window has no ungrouped active tab. Use the expanded variant
+    // here; the main full-window scenario separately asserts collapsed=true.
+    selectedGroup.collapsed = false;
+    const expected = sourceWindow.tabs
+      .filter((t) => t.groupKey === selectedGroup.groupKey)
+      .sort((x, y) => x.index - y.index);
+    const before = await c.page.evaluate(() =>
+      chrome.windows.getAll({ populate: true }),
+    );
+    const plan = await c.call({
+      type: "PLAN_RESTORE",
+      snapshot: selected,
+      selection: { groupKeys: [selectedGroup.groupKey] },
+    });
+    assert.equal(plan.windows.length, 1);
+    assert.equal(plan.windows[0].tabs.length, expected.length);
+    await c.call({ type: "START_RESTORE", planId: plan.id });
+    const state = await eventually(async () => {
+      const state = await c.call({ type: "GET_STATE" });
+      return state.operation?.status === "COMPLETED" ? state : false;
+    });
+    assert.deepEqual(state.operation.failures, []);
+    assert.equal(state.operation.createdWindows.length, 1);
+    const actual = await c.page.evaluate(
+      async (id) => ({
+        window: await chrome.windows.get(id, { populate: true }),
+        groups: await chrome.tabGroups.query({ windowId: id }),
+        all: await chrome.windows.getAll({ populate: true }),
+      }),
+      state.operation.createdWindows[0].windowId,
+    );
+    assert.equal(actual.all.length, before.length + 1);
+    for (const original of before)
+      assert.deepEqual(
+        actual.all
+          .find((w) => w.id === original.id)
+          .tabs.map((t) => ({ id: t.id, url: t.url })),
+        original.tabs.map((t) => ({ id: t.id, url: t.url })),
+      );
+    assert.deepEqual(
+      actual.window.tabs
+        .slice()
+        .sort((x, y) => x.index - y.index)
+        .map((t) => t.url),
+      expected.map((t) => t.url),
+    );
+    assert.equal(
+      actual.window.tabs.some((t) => t.pinned),
+      false,
+    );
+    assert.equal(actual.groups.length, 1);
+    assert.deepEqual(
+      {
+        title: actual.groups[0].title,
+        color: actual.groups[0].color,
+        collapsed: actual.groups[0].collapsed,
+      },
+      {
+        title: selectedGroup.title,
+        color: selectedGroup.color,
+        collapsed: false,
+      },
+    );
+    assert.ok(
+      actual.window.tabs.every((t) => t.groupId === actual.groups[0].id),
+    );
+    await c.context.close();
+  });
   await b.page.reload();
   await b.page.locator(`[data-device-id="${sa.deviceId}"]`).click();
   await b.page.locator("input[data-tab-key]").first().waitFor();
@@ -270,7 +454,19 @@ try {
         actual.map((t) => ({ url: t.url, pinned: t.pinned })),
         expected.map((t) => ({ url: t.url, pinned: t.pinned })),
       );
+      const sourceWindow = source.windows.find(
+        (x) => x.windowKey === mapping.sourceWindowKey,
+      );
+      const activeExpected = sourceWindow.tabs.find(
+        (t) => t.tabKey === sourceWindow.activeTabKey,
+      );
+      if (activeExpected)
+        assert.equal(actual.find((t) => t.active)?.url, activeExpected.url);
     }
+    assert.ok(
+      w.ws.some((item) => item.tabs.filter((t) => t.pinned).length >= 2),
+      "multiple pinned tabs survive restoration",
+    );
     const all = w.ws.flatMap((w) => w.tabs);
     assert.ok(all.find((t) => t.url?.includes("AI-Research"))?.pinned);
     assert.equal(JSON.stringify(current(sa.deviceId)), originalSource);
@@ -537,7 +733,8 @@ try {
     "evidence/e2e-results.json",
     JSON.stringify(
       {
-        transport: "test-only loopback HTTP; no TLS warning bypass",
+        transport:
+          "loopback HTTP fixture with explicit per-origin consent; no TLS warning bypass",
         browser: "Playwright Chromium persistent profiles",
         results,
       },

@@ -118,7 +118,30 @@ describe("snapshot security and limits (pure unit tests)", () => {
   });
   it("accepts empty current workspace", () =>
     expect(validateSnapshot(empty()).windows).toEqual([]));
-  it("requires HTTPS WebDAV, clamps history and normalizes endpoint", () => {
+  it("binds HTTP plaintext consent to an exact origin and clears it for HTTPS", () => {
+    expect(
+      checkSettings({
+        ...DEFAULT_SETTINGS,
+        endpoint: "http://nas.local:8080/dav",
+        httpAcknowledgedOrigin: "http://nas.local:8080",
+      }).endpoint,
+    ).toBe("http://nas.local:8080/dav/");
+    expect(() =>
+      checkSettings({
+        ...DEFAULT_SETTINGS,
+        endpoint: "http://nas.local:8081/dav",
+        httpAcknowledgedOrigin: "http://nas.local:8080",
+      }),
+    ).toThrow(/HTTP/);
+    expect(
+      checkSettings({
+        ...DEFAULT_SETTINGS,
+        endpoint: "https://nas.local/dav",
+        httpAcknowledgedOrigin: "http://nas.local",
+      }).httpAcknowledgedOrigin,
+    ).toBeUndefined();
+  });
+  it("requires HTTPS or acknowledged HTTP WebDAV, clamps history and normalizes endpoint", () => {
     expect(
       checkSettings({
         ...DEFAULT_SETTINGS,

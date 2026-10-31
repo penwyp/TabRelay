@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="TabRelay">
+  <defs><linearGradient id="background" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3975f5"/><stop offset="1" stop-color="#2453d7"/></linearGradient></defs>
+  <rect x="4" y="4" width="120" height="120" rx="29" fill="url(#background)"/>
+  <path d="M31 46h53M70 31l15 15-15 15" fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M97 82H44M58 67L43 82l15 15" fill="none" stroke="#a4e9f0" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

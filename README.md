@@ -25,7 +25,7 @@ npm run check
 
 在 Chrome 扩展管理页启用开发者模式，加载项目的 `dist/` 目录。工具栏打开 TabRelay 侧边栏，也可从 Popup 打开独立管理页。
 
-1. 设置设备名称、**HTTPS WebDAV 基础目录**、账号和应用专用密码。基础目录必须已经存在。
+1. 点击设置，打开独立的浏览器设置标签页。设置设备名称、**WebDAV 基础目录**（推荐 HTTPS；HTTP 需勾选明文风险确认）、账号和应用专用密码。基础目录必须已经存在。
 2. 授权该 WebDAV origin，开启自动同步。扩展只在用户点击保存/测试时请求该主机权限。
 3. 同一 WebDAV 目录配置到另一台设备。若启用加密，所有设备填写相同加密口令。
 4. 从设备列表选择快照和标签，点击预检，核对数量后确认恢复。
@@ -34,7 +34,7 @@ WebDAV 服务必须支持 `PROPFIND Depth: 1`、`MKCOL`、`GET`、`PUT`、`DELET
 
 ## 安全与数据说明
 
-- 生产构建只接受 HTTPS。重定向不跟随；凭据只发送给本机明确配置的 origin 和目录。
+- 生产构建支持 HTTPS 与 HTTP，默认推荐 HTTPS。HTTP 必须为当前主机明确勾选风险确认：账号、密码与未加密标签数据会以明文传输；可被同网络攻击者窃听或篡改。更换地址会重置确认。重定向不跟随；凭据只发送给本机明确配置的 origin 和目录。
 - URL 可能包含敏感信息。默认移除 `access_token/token/auth/code/password/secret/session` 查询参数，可自行配置；**无法保证识别所有敏感参数**。不要将不该离开本机的域名同步到服务器。
 - 无痕窗口不采集。只恢复 http/https，不恢复内嵌凭据、javascript/data/blob/file/chrome/其他扩展地址。
 - 设置和加密口令保存在扩展本机 storage.local，仅受信任扩展上下文可访问；不使用 content script、Cookie、history 或 scripting 权限。浏览器 Profile 被攻陷时，本机凭据与解锁口令不受保护。
@@ -60,11 +60,18 @@ Chrome 没有跨窗口原子事务。TabRelay 在每次创建前持久化意图�
 ```sh
 npm run typecheck
 npm test                 # 模拟 Chrome API / fetch 的单元与故障测试
-npm run build            # 严格 HTTPS 的生产扩展
+npm run build            # HTTP/HTTPS 生产扩展
 npx playwright install --with-deps chromium
 npm run test:e2e          # 两个真实 Chromium Profile + 本机 DAV 测试服务
 ```
 
-真实浏览器 E2E 使用单独 `dist-test/`，只增加 loopback HTTP 测试传输及固定 loopback 主机许可；不忽略 TLS 证书警告、不访问用户数据。生产 `dist/` 不包含此例外。E2E 生成截图与 JSON 结果到 `evidence/`；CI 上传为 `verification-evidence`，生产包作为 `TabRelay-extension`。
+真实浏览器 E2E 使用单独 `dist-test/`，只预授予固定 loopback 主机许可；HTTP 使用与生产一致的明确风险确认；不忽略 TLS 证书警告、不访问用户数据。生产 `dist/` 没有预授予主机权限。E2E 生成截图与 JSON 结果到 `evidence/`；CI 上传为 `verification-evidence`，生产包作为 `TabRelay-extension`。
 
 代码不依赖后端 SaaS，不自动上传到任何预设服务器。
+
+## 私密窗口、固定标签与标签组
+
+- 私密窗口指 Chrome 的无痕（Incognito）窗口。本扩展不允许无痕模式，也不会采集或恢复其中的内容，避免隐私数据进入 WebDAV。
+- 固定标签记录 `pinned` 状态，恢复后按 Chrome 规则排列在新窗口左侧；同类标签保持原顺序，不改动已有窗口。
+- 标签组记录名称、颜色、折叠状态及成员顺序，在新窗口中重建。固定标签不能同时属于标签组（Chrome 限制）。无标签组的标签仍保持未分组。
+- 本机现有标签/窗口不会因导入被关闭或替换；恢复不是浏览器登录会话迁移，不包含 Cookie 或登录态。

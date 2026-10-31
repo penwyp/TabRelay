@@ -36,4 +36,8 @@ button.addEventListener("click", () => {
     });
 });
 
+document.getElementById("open-settings")!.addEventListener("click", () => {
+  void chrome.runtime.openOptionsPage().then(() => window.close());
+});
+
 export {};

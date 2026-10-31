@@ -4,7 +4,7 @@
 
 ## 三个证据层级
 
-1. TypeScript 与构建：生产代码类型检查、esbuild 打包，生产 manifest HTTPS optional host。
+1. TypeScript 与构建：生产代码类型检查、esbuild 打包，生产 manifest HTTP/HTTPS optional host。
 2. 自动化单元/组件测试：真实业务模块，模拟 Chrome API、storage 和 fetch；覆盖 URL/结构/资源限制、隐私过滤、逻辑身份、来源去重、恢复/取消/撤销、持久 pending、并发锁、冲突及加密。
 3. 真实 Chromium：独立 A/B Profile、实际浏览器窗口/标签/组、实际本机 DAV HTTP 服务；检查新增恢复、来源不变、回传、防回环、认证/断网、取消、空快照恢复点、冲突。通过时生成真实 UI 截图。
 
@@ -14,7 +14,7 @@
 
 本次本地云命令沙箱禁止 Chromium 所需的 socket；申请普通运行权限后的命令在沙箱基础设施启动阶段失败，未绕过限制。提供 GitHub-hosted Linux CI 执行相同真实浏览器场景。如 CI 不可运行，应明确保留“未执行”，不能将模拟测试称作真实 E2E。
 
-生产构建严格 HTTPS；真实浏览器测试使用 `--test` 单独构建，对 127.0.0.1/localhost 的 HTTP 开放编译期例外（manifest 仅预授予 127.0.0.1），不使用 TLS 警告忽略参数。测试账户与页面都是合成内容。
+生产支持 HTTP 与 HTTPS；HTTP 需要显式明文风险确认。真实浏览器测试使用 `--test` 单独构建，仅 manifest 预授予 127.0.0.1 主机权限，传输逻辑与生产一致，不使用 TLS 警告忽略参数。测试账户与页面都是合成内容。
 
 ## 主要验收项
 

@@ -5,6 +5,7 @@ let store: Record<string, any>,
   sessionStore: Record<string, any>,
   chromeMock: any,
   publish: any,
+  connectionTest: any,
   collect: any,
   messageListener: any;
 const copy = <T>(x: T): T => structuredClone(x);
@@ -65,12 +66,13 @@ beforeEach(() => {
     },
   };
   sessionStore = { browserSession: "session" };
+  connectionTest = vi.fn(async () => {});
   publish = vi.fn(async () => ({ etag: '"v1"' }));
   collect = vi.fn(async () => copy(snap()));
   vi.doMock("../src/webdav", () => ({
     WebDAVRepository: class {
       publish = publish;
-      connectionTest = vi.fn();
+      connectionTest = connectionTest;
       listDevices = vi.fn();
       readSnapshot = vi.fn();
       listHistory = vi.fn();
@@ -107,6 +109,7 @@ beforeEach(() => {
     },
     runtime: {
       id: "test-extension",
+      getManifest: () => ({ version: "1.1.0" }),
       getURL: (p: string) => "chrome-extension://test-extension/" + p,
       onMessage: {
         addListener: (fn: any) => {
@@ -332,6 +335,78 @@ describe("sync coordinator with simulated events/storage and repository", () => 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("新的 WebDAV 目录");
     expect(store.state.settings.encryptionPassphrase).toBe("");
+  });
+  it.each([undefined, "http://other.example.org"])(
+    "rejects HTTP save without matching origin consent (%s)",
+    async (ack) => {
+      await import("../src/background");
+      const result = await send({
+        type: "SAVE_SETTINGS",
+        settings: {
+          ...store.state.settings,
+          endpoint: "http://dav.example.org/",
+          httpAcknowledgedOrigin: ack,
+          enabled: false,
+        },
+      });
+      expect(result.ok).toBe(false);
+      expect(store.state.settings.endpoint).toBe("https://dav.example.org/");
+      expect(publish).not.toHaveBeenCalled();
+    },
+  );
+  it.each([undefined, "http://other.example.org"])(
+    "rejects HTTP connection test without matching origin consent (%s)",
+    async (ack) => {
+      await import("../src/background");
+      const result = await send({
+        type: "TEST_CONNECTION",
+        settings: {
+          ...store.state.settings,
+          endpoint: "http://dav.example.org/",
+          httpAcknowledgedOrigin: ack,
+          enabled: false,
+        },
+      });
+      expect(result.ok).toBe(false);
+      expect(connectionTest).not.toHaveBeenCalled();
+    },
+  );
+  it("accepts explicit HTTP origin consent and invalidates it for another origin", async () => {
+    await import("../src/background");
+    const settings = {
+      ...store.state.settings,
+      endpoint: "http://dav.example.org/root/",
+      httpAcknowledgedOrigin: "http://dav.example.org",
+      enabled: false,
+    };
+    expect((await send({ type: "SAVE_SETTINGS", settings })).ok).toBe(true);
+    expect(store.state.settings.httpAcknowledgedOrigin).toBe(
+      "http://dav.example.org",
+    );
+    expect((await send({ type: "TEST_CONNECTION", settings })).ok).toBe(true);
+    expect(connectionTest).toHaveBeenCalledTimes(1);
+    const changed = await send({
+      type: "SAVE_SETTINGS",
+      settings: { ...settings, endpoint: "http://another.example.org/root/" },
+    });
+    expect(changed.ok).toBe(false);
+    expect(store.state.settings.endpoint).toBe("http://dav.example.org/root/");
+  });
+  it("accepts HTTPS settings without HTTP consent", async () => {
+    await import("../src/background");
+    const result = await send({
+      type: "SAVE_SETTINGS",
+      settings: {
+        ...store.state.settings,
+        endpoint: "https://secure.example.org/root/",
+        httpAcknowledgedOrigin: undefined,
+        enabled: false,
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(store.state.settings.endpoint).toBe(
+      "https://secure.example.org/root/",
+    );
   });
   it("rejects content-script or foreign senders before exposing credentials", async () => {
     await import("../src/background");

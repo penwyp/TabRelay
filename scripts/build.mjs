@@ -5,10 +5,14 @@ const out = testing ? "dist-test" : "dist";
 await fs.rm(out, { recursive: true, force: true });
 await fs.mkdir(out, { recursive: true });
 await build({
-  entryPoints: ["src/background.ts", "src/sidepanel.ts", "src/popup.ts"],
+  entryPoints: [
+    "src/background.ts",
+    "src/sidepanel.ts",
+    "src/popup.ts",
+    "src/options.ts",
+  ],
   bundle: true,
   outdir: out,
-  define: { __TABRELAY_TEST__: JSON.stringify(testing) },
   format: "esm",
   platform: "browser",
   target: "chrome120",
@@ -18,18 +22,29 @@ await fs.cp("public", out, { recursive: true });
 const manifest = {
   manifest_version: 3,
   name: "TabRelay",
-  version: "1.0.0",
+  version: "1.1.0",
   description:
     "通过 WebDAV 接力多设备标签与标签组，保留本机窗口，安全合并恢复。",
   minimum_chrome_version: "120",
   permissions: ["tabs", "tabGroups", "storage", "alarms", "sidePanel"],
-  optional_host_permissions: testing
-    ? ["https://*/*", "http://127.0.0.1/*"]
-    : ["https://*/*"],
-  ...(testing ? { host_permissions: ["http://127.0.0.1/*"] } : {}),
+  optional_host_permissions: ["https://*/*", "http://*/*"],
+  ...(testing
+    ? { host_permissions: ["http://127.0.0.1/*", "https://127.0.0.1/*"] }
+    : {}),
   background: { service_worker: "background.js", type: "module" },
   side_panel: { default_path: "sidepanel.html" },
-  action: { default_title: "打开 TabRelay", default_popup: "popup.html" },
+  options_ui: { page: "options.html", open_in_tab: true },
+  icons: {
+    16: "icons/icon-16.png",
+    32: "icons/icon-32.png",
+    48: "icons/icon-48.png",
+    128: "icons/icon-128.png",
+  },
+  action: {
+    default_icon: { 16: "icons/icon-16.png", 32: "icons/icon-32.png" },
+    default_title: "打开 TabRelay",
+    default_popup: "popup.html",
+  },
   incognito: "not_allowed",
   content_security_policy: {
     extension_pages: "script-src 'self'; object-src 'none'; base-uri 'none'",

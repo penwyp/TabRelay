@@ -8,15 +8,15 @@
 
 ## 模块
 
-| 文件 | 职责 |
-| --- | --- |
-| model.ts / types.ts | 数据模型、边界校验、URL/隐私策略、来源去重、恢复计划 |
-| state.ts | 本地状态串行读改写，避免并发 storage 丢更新 |
-| collector.ts | 普通非无痕窗口采集、Chrome ID → 逻辑 ID、来源映射 |
-| webdav.ts | 有界 HTTP、目录枚举、加密、强 ETag 条件写、恢复点与历史 |
-| background.ts | MV3 事件、报警兜底、同步状态、可信消息与命令协调 |
-| restore.ts | 创建意图日志、串行恢复、组重建、取消、最终核验、安全撤销 |
-| sidepanel.ts / popup.ts | 实际设备浏览、细粒度选择、预检确认、状态与设置 |
+| 文件                    | 职责                                                     |
+| ----------------------- | -------------------------------------------------------- |
+| model.ts / types.ts     | 数据模型、边界校验、URL/隐私策略、来源去重、恢复计划     |
+| state.ts                | 本地状态串行读改写，避免并发 storage 丢更新              |
+| collector.ts            | 普通非无痕窗口采集、Chrome ID → 逻辑 ID、来源映射        |
+| webdav.ts               | 有界 HTTP、目录枚举、加密、强 ETag 条件写、恢复点与历史  |
+| background.ts           | MV3 事件、报警兜底、同步状态、可信消息与命令协调         |
+| restore.ts              | 创建意图日志、串行恢复、组重建、取消、最终核验、安全撤销 |
+| sidepanel.ts / popup.ts | 实际设备浏览、细粒度选择、预检确认、状态与设置           |
 
 ## 发布协议
 
@@ -32,11 +32,11 @@
 
 ## 权限
 
-仅 tabs、tabGroups、storage、alarms、sidePanel。生产 host 为 optional HTTPS，请用户明确选择后按 origin 授权。不声明 content scripts、cookies、history、scripting、activeTab、file 或所有站点常驻权限。消息仅接受扩展自身 ID 和扩展页面 URL，内容脚本/网页不能调用凭据或恢复操作。
+仅 tabs、tabGroups、storage、alarms、sidePanel。生产 host 为 optional HTTP/HTTPS，请用户明确选择后按 origin 授权。不声明 content scripts、cookies、history、scripting、activeTab、file 或所有站点常驻权限。消息仅接受扩展自身 ID 和扩展页面 URL，内容脚本/网页不能调用凭据或恢复操作。
 
 ## 当前工程边界
 
-- 测试传输限定本机 HTTP；线上 HTTPS、真实 WebDAV 厂商兼容性应单独实测，不能由模拟测试推定。
+- HTTP 凭据发送前校验当前 origin 的显式风险确认，HTTPS 无需该确认；配置 UI 修改地址即重置勾选，跨 origin 不能沿用确认。测试传输使用本机 HTTP；线上 HTTPS、真实 WebDAV 厂商兼容性应单独实测，不能由模拟测试推定。
 - 历史恢复和加密口令变更不是迁移工具，口令轮换须新目录。
 - 大型页面加载、登录、实际网站可达性不等于标签对象创建成功；最终核验会报告可观察差异。
 - WebDAV 状态是每设备独立发布，不是自动全局合并；远端快照仅在用户主动选择后打开。

@@ -463,4 +463,79 @@ describe("WebDAV publication and failure behavior", () => {
     ).rejects.toMatchObject({ code: "conflict" });
     expect(JSON.parse(server.files.get(path)!.body).revision).toBe(9);
   });
+  it("accepts arbitrary HTTP only with exact origin consent", async () => {
+    const server = dav();
+    const httpSettings = {
+      ...settings,
+      endpoint: "http://dav.office.example:8080/base/",
+      httpAcknowledgedOrigin: "http://dav.office.example:8080",
+    };
+    const repo = new WebDAVRepository(httpSettings);
+    await repo.connectionTest();
+    expect(server.calls[0].url).toBe(httpSettings.endpoint);
+    expect(server.calls[0].headers.get("authorization")).toMatch(/^Basic /);
+    expect(
+      normalizeEndpoint(
+        httpSettings.endpoint,
+        httpSettings.httpAcknowledgedOrigin,
+      ),
+    ).toBe(httpSettings.endpoint);
+  });
+  it.each([
+    undefined,
+    "http://other.example:8080",
+    "http://dav.office.example",
+    "https://dav.office.example:8080",
+    "http://dav.office.example:8080/base/",
+  ])(
+    "rejects HTTP before fetch with absent or mismatched consent %s",
+    (consent) => {
+      const server = dav();
+      expect(
+        () =>
+          new WebDAVRepository({
+            ...settings,
+            endpoint: "http://dav.office.example:8080/base/",
+            httpAcknowledgedOrigin: consent,
+          }),
+      ).toThrowError(
+        expect.objectContaining({ code: "http-consent-required" }),
+      );
+      expect(server.calls).toHaveLength(0);
+    },
+  );
+  it("rechecks HTTP consent before network access after revocation", async () => {
+    const server = dav();
+    const httpSettings = {
+      ...settings,
+      endpoint: "http://dav.office.example/base/",
+      httpAcknowledgedOrigin: "http://dav.office.example",
+    };
+    const repo = new WebDAVRepository(httpSettings);
+    httpSettings.httpAcknowledgedOrigin = "";
+    await expect(repo.connectionTest()).rejects.toMatchObject({
+      code: "http-consent-required",
+    });
+    expect(server.calls).toHaveLength(0);
+  });
+  it("does not follow HTTP redirects or transfer acknowledged consent to another host", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.redirect).toBe("error");
+      return new Response(null, {
+        status: 307,
+        headers: { location: "http://evil.example/stolen" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const repo = new WebDAVRepository({
+      ...settings,
+      endpoint: "http://dav.office.example/base/",
+      httpAcknowledgedOrigin: "http://dav.office.example",
+    });
+    await expect(repo.connectionTest()).rejects.toMatchObject({
+      code: "redirect",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("http://dav.office.example/base/");
+  });
 });

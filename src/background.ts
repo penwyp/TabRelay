@@ -102,7 +102,7 @@ export async function sync(force = false) {
     const device: Device = {
       deviceId: s.deviceId,
       name: s.settings.deviceName,
-      version: "1.0.0",
+      version: chrome.runtime.getManifest().version,
       updatedAt: new Date().toISOString(),
       windows: send.windows.length,
       tabs: send.windows.reduce((n, w) => n + w.tabs.length, 0),

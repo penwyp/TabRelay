@@ -39,6 +39,8 @@ export type Snapshot = {
   windows: WorkspaceWindow[];
 };
 export type Settings = {
+  /** Explicit HTTP plaintext-risk acknowledgment, bound to configured origin. */
+  httpAcknowledgedOrigin?: string;
   endpoint: string;
   username: string;
   password: string;

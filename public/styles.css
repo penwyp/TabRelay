@@ -801,3 +801,256 @@ dialog::backdrop {
     max-width: 135px;
   }
 }
+
+/* Shared relay identity and standalone options page. */
+.brand-icon {
+  display: block;
+  flex-shrink: 0;
+  border-radius: 10px;
+  box-shadow: 0 3px 9px #254baf1c;
+}
+.options-body {
+  min-width: 320px;
+  background: #f6f8fc;
+  font-size: 14px;
+}
+.options-topbar {
+  height: 88px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 1160px;
+  margin: auto;
+  padding: 0 42px;
+  border-bottom: 1px solid var(--line);
+}
+.settings-page-label {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+.options-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 590px);
+  justify-content: center;
+  align-items: start;
+  gap: 62px;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 52px 42px 30px;
+}
+.options-intro {
+  padding-top: 17px;
+  position: sticky;
+  top: 28px;
+}
+.options-intro h1 {
+  font-size: 34px;
+  line-height: 1.5;
+  margin: 12px 0 17px;
+  letter-spacing: -1px;
+}
+.options-intro > p {
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 270px;
+  line-height: 1.9;
+}
+.options-principles {
+  margin-top: 43px;
+  display: grid;
+  gap: 25px;
+}
+.options-principles > div {
+  position: relative;
+  padding-left: 38px;
+}
+.options-principles span {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-size: 11px;
+  color: #6682b3;
+  padding-top: 2px;
+}
+.options-principles strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+.options-principles p {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.8;
+  margin-top: 5px;
+}
+.options-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 30px 32px;
+  box-shadow: 0 12px 35px #21395a05;
+}
+.options-card-heading {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 21px;
+}
+.options-card-heading h2 {
+  font-size: 21px;
+  letter-spacing: -0.4px;
+}
+.options-card-heading p {
+  font-size: 11px;
+  margin-top: 6px;
+}
+.options-card fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.options-card .field {
+  font-size: 12px;
+  margin-top: 19px;
+}
+.options-card .field:first-child {
+  margin-top: 0;
+}
+.options-card .field input,
+.options-card .field textarea {
+  padding: 11px 12px;
+  font-size: 13px;
+}
+.options-card .field-grid {
+  align-items: end;
+}
+.options-card .field-grid .field:first-child {
+  margin-top: 19px;
+}
+.options-card .field-hint {
+  font-size: 11px;
+  line-height: 1.75;
+}
+.options-card .toggle-line {
+  font-size: 12px;
+  margin: 24px 0;
+}
+.options-card .privacy-settings summary {
+  font-size: 12px;
+}
+.options-card .privacy-note {
+  font-size: 11px;
+  line-height: 1.8;
+  padding: 15px;
+  margin-top: 24px;
+}
+.options-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+.options-actions button {
+  min-height: 41px;
+  padding: 10px 21px;
+}
+.settings-feedback {
+  font-size: 12px;
+  padding: 13px 15px;
+  background: #edf7f3;
+  color: #186a52;
+  border-radius: 9px;
+  margin-top: 18px;
+  overflow-wrap: anywhere;
+}
+.settings-feedback.error {
+  background: #fff1f1;
+  color: #a2363d;
+}
+.http-risk {
+  border: 1px solid #eed3a2;
+  background: #fff9ed;
+  color: #72501b;
+  border-radius: 11px;
+  padding: 16px;
+  margin-top: 15px;
+  font-size: 11px;
+  line-height: 1.8;
+}
+.http-risk strong {
+  display: block;
+  font-size: 12px;
+  color: #7c4e12;
+  margin-bottom: 6px;
+}
+.http-risk p + p {
+  margin-top: 7px;
+}
+.http-risk label {
+  display: block;
+  margin-top: 11px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.7;
+}
+.http-risk .field-hint {
+  color: #805f2c;
+  margin-top: 7px;
+  font-size: 10px;
+}
+#http-origin {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.options-footer {
+  text-align: center;
+  color: var(--muted);
+  font-size: 10px;
+  margin: 0 20px 28px;
+}
+@media (max-width: 850px) {
+  .options-layout {
+    grid-template-columns: minmax(0, 620px);
+    gap: 25px;
+    padding: 30px 24px;
+  }
+  .options-intro {
+    position: static;
+    padding: 0;
+  }
+  .options-intro h1 {
+    font-size: 28px;
+    margin: 7px 0 10px;
+  }
+  .options-intro h1 br {
+    display: none;
+  }
+  .options-intro > p {
+    max-width: none;
+  }
+  .options-principles {
+    display: none;
+  }
+  .options-topbar {
+    padding: 0 26px;
+    height: 76px;
+  }
+  .options-card {
+    padding: 25px;
+  }
+}
+@media (max-width: 420px) {
+  .options-layout {
+    padding: 24px 16px;
+  }
+  .options-card {
+    padding: 22px 18px;
+  }
+  .options-intro h1 {
+    font-size: 25px;
+  }
+  .options-card .field-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}

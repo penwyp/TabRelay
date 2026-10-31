@@ -10,8 +10,13 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true">↗</span
-          ><span
+          <img
+            class="brand-icon"
+            src="icons/icon-48.png"
+            width="36"
+            height="36"
+            alt=""
+          /><span
             >TabRelay<span class="brand-caption">WORKSPACE RELAY</span></span
           >
         </div>
@@ -26,8 +31,8 @@
           ><button
             id="settings-open"
             class="icon-button"
-            title="设置"
-            aria-label="设置"
+            title="在新标签页打开设置"
+            aria-label="在新标签页打开设置"
           >
             ⚙
           </button>
@@ -143,108 +148,6 @@
         </footer>
       </main>
     </div>
-    <dialog id="settings-dialog">
-      <form id="settings-form">
-        <div class="dialog-heading">
-          <div>
-            <div class="eyebrow">CONNECTION & PRIVACY</div>
-            <h2>同步设置</h2>
-          </div>
-          <button
-            type="button"
-            id="settings-close"
-            class="icon-button"
-            aria-label="关闭设置"
-          >
-            ×
-          </button>
-        </div>
-        <label class="field"
-          >设备名称<input
-            id="device-name"
-            name="deviceName"
-            required
-            maxlength="80"
-            placeholder="例如：我的工作电脑" /></label
-        ><label class="field"
-          >WebDAV 地址<input
-            id="endpoint"
-            name="endpoint"
-            required
-            type="url"
-            placeholder="https://dav.example.com/remote.php/dav/files/me/"
-        /></label>
-        <p class="field-hint">
-          必须使用 HTTPS。TabRelay 会在此目录下创建 tabrelay/v1。
-        </p>
-        <div class="field-grid">
-          <label class="field"
-            >用户名<input
-              id="username"
-              name="username"
-              autocomplete="username" /></label
-          ><label class="field"
-            >应用专用密码<input
-              id="password"
-              name="password"
-              type="password"
-              autocomplete="new-password"
-              placeholder="WebDAV 应用专用密码"
-          /></label>
-        </div>
-        <label class="toggle-line"
-          ><input id="enabled" type="checkbox" />
-          自动同步本机所有普通窗口</label
-        >
-        <details class="privacy-settings">
-          <summary>隐私与保留策略</summary>
-          <label class="field"
-            >不采集的域名<textarea
-              id="blacklist"
-              rows="2"
-              placeholder="bank.example.com&#10;internal.example.com"
-            ></textarea>
-          </label>
-          <p class="field-hint">每行一个域名，同时排除其子域名。</p>
-          <label class="field"
-            >移除的 URL 查询参数<input
-              id="strip-params"
-              placeholder="token, access_token, code" /></label
-          ><label class="field"
-            >历史快照保留数<input
-              id="history-limit"
-              type="number"
-              min="1"
-              max="100"
-              value="20" /></label
-          ><label class="field"
-            >快照加密口令（可选）<input
-              id="encryption-passphrase"
-              type="password"
-              autocomplete="new-password"
-              placeholder="所有设备使用相同口令"
-          /></label>
-          <p class="field-hint">
-            启用后使用 AES-GCM
-            加密快照。口令保存在本机受信任扩展存储中；遗失后无法读取加密快照。设备名称与同步时间仍为明文。首次成功发布后不可在同一目录更换口令；如需更换，请使用新的
-            WebDAV 目录。
-          </p>
-        </details>
-        <div class="privacy-note">
-          标签 URL 可能包含登录令牌等敏感信息。请使用可信
-          WebDAV，并配置需要移除的参数。不会同步
-          Cookie、表单、页面内容或无痕窗口。
-        </div>
-        <p id="settings-error" class="inline-error" role="alert" hidden></p>
-        <div class="dialog-actions">
-          <button type="button" id="test-connection" class="secondary">
-            测试连接</button
-          ><button type="submit" id="save-settings" class="primary">
-            保存设置
-          </button>
-        </div>
-      </form>
-    </dialog>
     <dialog id="restore-dialog">
       <div class="dialog-heading">
         <div>

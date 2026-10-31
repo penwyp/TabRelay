@@ -3,7 +3,6 @@ import type {
   Device,
   Plan,
   RestoreOperation,
-  Settings,
   Snapshot,
   Tab,
   WorkspaceWindow,
@@ -42,7 +41,6 @@ let loadSequence = 0;
 let polling = false;
 let planning = false;
 let starting = false;
-let settingsBusy = false;
 let deviceLoadSequence = 0;
 let confirmResolver: ((value: boolean) => void) | undefined;
 
@@ -90,7 +88,22 @@ function activeOperation(operation?: RestoreOperation): boolean {
 }
 
 function renderState(value: AppState) {
+  const endpointChanged = Boolean(
+    state && state.settings.endpoint !== value.settings.endpoint,
+  );
   state = value;
+  if (endpointChanged) {
+    ++loadSequence;
+    ++deviceLoadSequence;
+    selectedDevice = undefined;
+    snapshot = undefined;
+    plan = undefined;
+    devices = [];
+    selectedTabs.clear();
+    show("snapshot-section", false);
+    renderDevices();
+    if (value.settings.endpoint) void refreshDevices(true);
+  }
   text("local-name", value.settings.deviceName || "当前设备");
   text(
     "local-count",
@@ -471,100 +484,9 @@ function updateSelection() {
   );
 }
 function openSettings() {
-  if (!state) {
-    notice("设备状态尚未加载，请稍后重试。", true);
-    return;
-  }
-  const settings = state.settings;
-  input("device-name").value = settings.deviceName;
-  input("endpoint").value = settings.endpoint;
-  input("username").value = settings.username;
-  input("password").value = settings.password;
-  input("enabled").checked = settings.enabled;
-  $<HTMLTextAreaElement>("blacklist").value = settings.blacklist.join("\n");
-  input("strip-params").value = settings.stripParams.join(", ");
-  input("history-limit").value = String(settings.historyLimit);
-  input("encryption-passphrase").value = settings.encryptionPassphrase;
-  show("settings-error", false);
-  dialog("settings-dialog").showModal();
-}
-function readSettings(): Settings {
-  const endpoint = input("endpoint").value.trim();
-  const parsed = new URL(endpoint);
-  if (
-    parsed.protocol !== "https:" ||
-    parsed.username ||
-    parsed.password ||
-    parsed.hash ||
-    parsed.search
-  )
-    throw new Error(
-      "请使用不含用户名、密码、查询参数或片段的 HTTPS WebDAV 地址。",
-    );
-  const deviceName = input("device-name").value.trim();
-  if (!deviceName) throw new Error("请输入设备名称。");
-  const historyLimit = Number(input("history-limit").value);
-  if (!Number.isInteger(historyLimit) || historyLimit < 1 || historyLimit > 100)
-    throw new Error("历史快照保留数应为 1–100。");
-  return {
-    endpoint,
-    username: input("username").value,
-    password: input("password").value,
-    deviceName,
-    enabled: input("enabled").checked,
-    blacklist: $<HTMLTextAreaElement>("blacklist")
-      .value.split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean),
-    stripParams: input("strip-params")
-      .value.split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean),
-    historyLimit,
-    encryptionPassphrase: input("encryption-passphrase").value,
-  };
-}
-async function applySettings(testOnly: boolean) {
-  if (settingsBusy) return;
-  settingsBusy = true;
-  setBusy("test-connection", true);
-  setBusy("save-settings", true);
-  try {
-    const settings = readSettings();
-    // Called directly from a user click/submit, before any awaited operation.
-    const granted = await chrome.permissions.request({
-      origins: [new URL(settings.endpoint).origin + "/*"],
-    });
-    if (!granted) throw new Error("未授予所选 WebDAV 主机权限。设置未保存。");
-    setBusy("test-connection", true);
-    setBusy("save-settings", true);
-    show("settings-error", false);
-    await request({
-      type: testOnly ? "TEST_CONNECTION" : "SAVE_SETTINGS",
-      settings,
-    });
-    if (testOnly) {
-      text("settings-error", "连接成功，可以保存设置。");
-      $("settings-error").style.color = "var(--green)";
-      show("settings-error", true);
-    } else {
-      dialog("settings-dialog").close();
-      selectedDevice = undefined;
-      snapshot = undefined;
-      show("snapshot-section", false);
-      await refreshState();
-      notice("设置已保存。设备各自发布快照，恢复只会新增窗口。");
-      await refreshDevices(true);
-    }
-  } catch (error) {
-    text("settings-error", errorMessage(error));
-    $("settings-error").style.color = "";
-    show("settings-error", true);
-  } finally {
-    settingsBusy = false;
-    setBusy("test-connection", false);
-    setBusy("save-settings", false);
-  }
+  void chrome.runtime
+    .openOptionsPage()
+    .catch((error: unknown) => notice(errorMessage(error), true));
 }
 async function previewRestore() {
   if (!snapshot || planning) return;
@@ -697,16 +619,6 @@ async function operationAction(type: string) {
 
 $("settings-open").addEventListener("click", openSettings);
 $("onboarding-setup").addEventListener("click", openSettings);
-$("settings-close").addEventListener("click", () =>
-  dialog("settings-dialog").close(),
-);
-$("settings-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  void applySettings(false);
-});
-$("test-connection").addEventListener("click", () => {
-  void applySettings(true);
-});
 $("refresh").addEventListener("click", () => {
   void refreshState().then(() => refreshDevices(true));
 });
