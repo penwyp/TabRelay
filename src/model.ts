@@ -226,7 +226,19 @@ export function contentIdentity(t: {
 export async function hash(value: unknown): Promise<string> {
   const b = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(JSON.stringify(value)),
+    // Chrome storage may reorder dictionary keys. Hash semantic JSON structure,
+    // preserving array order and all values rather than serialization order.
+    new TextEncoder().encode(
+      JSON.stringify(value, (_key, item) =>
+        item && typeof item === "object" && !Array.isArray(item)
+          ? Object.fromEntries(
+              Object.keys(item)
+                .sort()
+                .map((key) => [key, item[key]]),
+            )
+          : item,
+      ),
+    ),
   );
   return [...new Uint8Array(b)]
     .map((x) => x.toString(16).padStart(2, "0"))

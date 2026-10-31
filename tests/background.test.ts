@@ -652,6 +652,70 @@ describe("sync coordinator with simulated events/storage and repository", () => 
     expect(status.data.sources).toEqual([]);
     expect(publish).not.toHaveBeenCalled();
   });
+  it("starts an unchanged persisted plan despite nested Chrome-style dictionary key reordering", async () => {
+    store.state.settings.enabled = false;
+    collect.mockResolvedValue({ ...snap(), windows: [] });
+    const source = snap("remote");
+    source.deviceId = "remote-device";
+    source.windows[0].tabs[0].origin.deviceId = "remote-device";
+    source.windows[0].tabs[0].content = {
+      status: "disabled",
+      reason: "未启用",
+    };
+    await import("../src/background");
+    const planned = await send({ type: "PLAN_RESTORE", snapshot: source });
+    expect(planned.ok).toBe(true);
+    const reorder = (value: any): any =>
+      Array.isArray(value)
+        ? value.map(reorder)
+        : value && typeof value === "object"
+          ? Object.fromEntries(
+              Object.keys(value)
+                .sort()
+                .map((key) => [key, reorder(value[key])]),
+            )
+          : value;
+    store.restorePlan = reorder(store.restorePlan);
+    const started = await send({
+      type: "START_RESTORE",
+      planId: planned.data.id,
+    });
+    expect(started.ok, started.error).toBe(true);
+    expect((await import("../src/restore")).prepare).toHaveBeenCalledTimes(1);
+  });
+  it.each(["url", "pin", "group"])(
+    "still rejects a changed %s in a persisted restore plan",
+    async (change) => {
+      store.state.settings.enabled = false;
+      collect.mockResolvedValue({ ...snap(), windows: [] });
+      const source = snap("remote");
+      source.windows[0].tabs[0].groupKey = "group";
+      source.windows[0].groups = [
+        {
+          groupKey: "group",
+          title: "Original",
+          color: "blue",
+          collapsed: false,
+        },
+      ];
+      await import("../src/background");
+      const planned = await send({ type: "PLAN_RESTORE", snapshot: source });
+      expect(planned.ok).toBe(true);
+      // Chrome storage persists JSON values, not shared object alias identity.
+      store.restorePlan = JSON.parse(JSON.stringify(store.restorePlan));
+      const window = store.restorePlan.windows[0];
+      if (change === "url") window.tabs[0].url = "https://changed.org/";
+      else if (change === "pin") window.tabs[0].pinned = true;
+      else window.groups[0].title = "Changed";
+      const started = await send({
+        type: "START_RESTORE",
+        planId: planned.data.id,
+      });
+      expect(started.ok).toBe(false);
+      expect(started.error).toContain("状态已变化");
+      expect((await import("../src/restore")).prepare).not.toHaveBeenCalled();
+    },
+  );
   it("rejects content-script or foreign senders before exposing credentials", async () => {
     await import("../src/background");
     const result = await send(

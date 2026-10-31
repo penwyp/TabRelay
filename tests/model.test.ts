@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  hash,
   validateSnapshot,
   safeUrl,
   makePlan,
@@ -230,5 +231,50 @@ describe("restore plans and provenance (pure unit tests)", () => {
     await expect(
       makePlan({ ...snapshot(), schemaVersion: 99 }, empty()),
     ).rejects.toThrow();
+  });
+});
+
+describe("canonical restore fingerprints", () => {
+  it("ignores nested dictionary serialization order but not actual data", async () => {
+    const a = {
+      windows: [
+        {
+          tabs: [
+            {
+              url: "https://example.org/",
+              pinned: false,
+              content: { status: "disabled", reason: "未启用" },
+            },
+          ],
+        },
+      ],
+    };
+    const b = {
+      windows: [
+        {
+          tabs: [
+            {
+              content: { reason: "未启用", status: "disabled" },
+              pinned: false,
+              url: "https://example.org/",
+            },
+          ],
+        },
+      ],
+    };
+    expect(await hash(a)).toBe(await hash(b));
+    for (const patch of [
+      { url: "https://changed.org/" },
+      { pinned: true },
+      { groupKey: "different-group" },
+    ]) {
+      const changed = structuredClone(a);
+      Object.assign(changed.windows[0].tabs[0], patch);
+      expect(await hash(changed)).not.toBe(await hash(a));
+    }
+    expect(await hash(["first", "second"])).not.toBe(
+      await hash(["second", "first"]),
+    );
+    expect(await hash({ x: undefined, y: 1 })).toBe(await hash({ y: 1 }));
   });
 });
