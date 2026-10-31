@@ -265,7 +265,7 @@ function seedSearchFixture() {
       tabs: [tab("search-trip", "周末骑行路线", "cycling-route", 0)],
     },
   ]);
-  const recovery = make("search-empty-recovery", 0, []);
+  const recovery = make("search-empty-recovery", 1, []);
   dav.files.set(
     devicePath + "device.json",
     JSON.stringify({
@@ -902,11 +902,13 @@ try {
       loaded.sources.some(
         (source) => source.kind === "current" && source.status === "loaded",
       ),
+      "Expected loaded current source: " + JSON.stringify(loaded),
     );
     assert.ok(
       loaded.sources.some(
         (source) => source.kind === "history" && source.status === "not-loaded",
       ),
+      "Expected explicitly unrequested history: " + JSON.stringify(loaded),
     );
     assert.equal((await querySearch("资源成本治理")).total, 0);
     await searchPage.locator("#include-history").check();
@@ -919,6 +921,7 @@ try {
           source.kind === "recovery" &&
           source.status === "loaded",
       ),
+      "Expected valid loaded empty recovery: " + JSON.stringify(complete),
     );
     assert.ok(
       complete.sources.some(
@@ -927,8 +930,14 @@ try {
           source.kind === "history" &&
           source.status === "loaded",
       ),
+      "Expected loaded historical source: " + JSON.stringify(complete),
     );
-    historicalHit = (await querySearch("资源成本治理")).results[0];
+    const historicalResponse = await querySearch("资源成本治理");
+    historicalHit = historicalResponse.results[0];
+    assert.ok(
+      historicalHit,
+      "Expected labeled historical hit: " + JSON.stringify(historicalResponse),
+    );
     assert.equal(historicalHit.tabKey, "search-budget");
     assert.equal(historicalHit.kind, "history");
     assert.equal(historicalHit.stale, true);
@@ -956,7 +965,11 @@ try {
       assert.equal(
         recallAt10,
         1,
-        label.query + " expected " + JSON.stringify(label.expected),
+        label.query +
+          " expected " +
+          JSON.stringify(label.expected) +
+          " response=" +
+          JSON.stringify(response),
       );
       measurements.push({ ...label, returned: actual, recallAt10 });
     }
@@ -1112,7 +1125,12 @@ try {
       deviceId: sd.deviceId,
       kind: "current",
     });
-    assert.equal(local.total, 1);
+    assert.equal(
+      local.total,
+      1,
+      "Expected one verified local current occurrence: " +
+        JSON.stringify(local),
+    );
     const located = await d.call({
       type: "SEARCH_LOCATE",
       resultId: local.results[0].id,
@@ -1141,6 +1159,7 @@ try {
           source.kind === "current" &&
           source.status === "failed",
       ),
+      "Expected missing current source failure: " + JSON.stringify(failed),
     );
     assert.ok(
       failed.sources.some(
@@ -1149,6 +1168,8 @@ try {
           source.kind === "recovery" &&
           source.status === "loaded",
       ),
+      "Expected empty recovery loaded despite current source failure: " +
+        JSON.stringify(failed),
     );
     assert.ok((await querySearch("资源成本治理")).total >= 1);
     dav.files.set(currentKey, saved);
