@@ -45,6 +45,7 @@ async function browser(name) {
       `--load-extension=${extension}`,
     ],
     viewport: { width: 1180, height: 900 },
+    deviceScaleFactor: 2,
   };
   if (process.env.CHROMIUM_PATH) {
     options.executablePath = process.env.CHROMIUM_PATH;
@@ -236,6 +237,11 @@ try {
     const merged = current(sb.deviceId);
     assert.equal(merged.windows.length, 5);
     assert.equal(merged.windows.flatMap((w) => w.tabs).length, 8);
+    assert.equal(
+      s.operation.failures.length,
+      0,
+      JSON.stringify(s.operation.failures),
+    );
     const imported = s.operation.createdWindows;
     const w = await b.worker.evaluate(
       async (ids) => {
@@ -251,6 +257,20 @@ try {
         (g) => g.title === "AI 平台研究" && g.color === "blue" && g.collapsed,
       ),
     );
+    for (const mapping of imported) {
+      const expected = source.windows
+        .find((x) => x.windowKey === mapping.sourceWindowKey)
+        .tabs.slice()
+        .sort((a, b) => a.index - b.index);
+      const actual = w.ws
+        .find((x) => x.id === mapping.windowId)
+        .tabs.slice()
+        .sort((a, b) => a.index - b.index);
+      assert.deepEqual(
+        actual.map((t) => ({ url: t.url, pinned: t.pinned })),
+        expected.map((t) => ({ url: t.url, pinned: t.pinned })),
+      );
+    }
     const all = w.ws.flatMap((w) => w.tabs);
     assert.ok(all.find((t) => t.url?.includes("AI-Research"))?.pinned);
     assert.equal(JSON.stringify(current(sa.deviceId)), originalSource);

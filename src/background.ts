@@ -20,6 +20,31 @@ const ready = (async () => {
     accessLevel: "TRUSTED_CONTEXTS",
   });
   await load();
+  // storage.session is cleared on a complete browser restart, but survives MV3 worker suspension.
+  // Do not rely solely on runtime.onStartup: unpacked/reloaded extension startup can omit that event.
+  const session = await chrome.storage.session.get("browserSession");
+  const browserSession =
+    typeof session.browserSession === "string"
+      ? session.browserSession
+      : crypto.randomUUID();
+  if (!session.browserSession)
+    await chrome.storage.session.set({ browserSession });
+  await update((s) => {
+    if (s.identities.browserSession !== browserSession) {
+      s.identities = { browserSession, tabs: {}, windows: {}, groups: {} };
+      s.sync.dirty = true;
+      s.sync.generation++;
+      if (
+        s.operation &&
+        ["PREPARED", "RUNNING", "INTERRUPTED"].includes(s.operation.status)
+      ) {
+        s.operation.status = "INTERRUPTED";
+        s.operation.error =
+          "浏览器会话已变化，无法安全自动续做或撤销旧窗口。请保留当前结果并停止任务。";
+      }
+      startupUntil = Date.now() + 10_000;
+    }
+  });
   await interruptOnBoot();
   await chrome.alarms.create("tabrelay-reconcile", { periodInMinutes: 0.5 });
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -322,16 +347,7 @@ chrome.alarms.onAlarm.addListener((a) => {
 });
 chrome.runtime.onStartup.addListener(() => {
   startupUntil = Date.now() + 10_000;
-  void update((s) => {
-    s.identities = {
-      browserSession: crypto.randomUUID(),
-      tabs: {},
-      windows: {},
-      groups: {},
-    };
-    s.sync.dirty = true;
-    s.sync.generation++;
-  });
+  void ready.then(() => dirty());
 });
 chrome.runtime.onInstalled.addListener(() => {
   void mark();

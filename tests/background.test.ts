@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../src/model";
 import type { Snapshot } from "../src/types";
 let store: Record<string, any>,
+  sessionStore: Record<string, any>,
   chromeMock: any,
   publish: any,
   collect: any,
@@ -63,6 +64,7 @@ beforeEach(() => {
       },
     },
   };
+  sessionStore = { browserSession: "session" };
   publish = vi.fn(async () => ({ etag: '"v1"' }));
   collect = vi.fn(async () => copy(snap()));
   vi.doMock("../src/webdav", () => ({
@@ -85,6 +87,13 @@ beforeEach(() => {
   }));
   chromeMock = {
     storage: {
+      session: {
+        get: async (key: string) => ({ [key]: copy(sessionStore[key]) }),
+        set: async (data: any) => {
+          Object.assign(sessionStore, copy(data));
+        },
+        setAccessLevel: vi.fn(async () => {}),
+      },
       local: {
         get: async (key: string) => ({ [key]: copy(store[key]) }),
         set: async (data: any) => {
@@ -140,6 +149,63 @@ afterEach(() => {
   vi.doUnmock("../src/restore");
 });
 describe("sync coordinator with simulated events/storage and repository", () => {
+  it("preserves runtime mappings when the browser session survives a worker restart", async () => {
+    store.state.identities.windows = { "41": "logical-window" };
+    store.state.identities.tabs = {
+      "52": {
+        key: "logical-tab",
+        origin: { deviceId: "a", tabKey: "t" },
+        url: "https://example.org/",
+        windowKey: "logical-window",
+        index: 0,
+      },
+    };
+    const original = copy(store.state.identities);
+    await import("../src/background");
+    await send({ type: "GET_STATE" });
+    expect(store.state.identities).toEqual(original);
+    vi.resetModules();
+    await import("../src/background");
+    await send({ type: "GET_STATE" });
+    expect(store.state.identities).toEqual(original);
+    expect(sessionStore.browserSession).toBe("session");
+  });
+  it("invalidates runtime mappings when session storage clears on full browser relaunch", async () => {
+    sessionStore = {};
+    store.state.identities.windows = { "41": "old-window" };
+    store.state.identities.tabs = { "52": { key: "old-tab" } };
+    store.state.identities.groups = { "63": "old-group" };
+    store.state.current = snap("previous-capture");
+    store.state.operation = {
+      id: "old-operation",
+      browserSession: "session",
+      status: "INTERRUPTED",
+      syncStatus: "pending",
+    };
+    await import("../src/background");
+    await send({ type: "GET_STATE" });
+    expect(sessionStore.browserSession).toEqual(expect.any(String));
+    expect(sessionStore.browserSession).not.toBe("session");
+    expect(store.state.identities.browserSession).toBe(
+      sessionStore.browserSession,
+    );
+    expect(store.state.identities.windows).toEqual({});
+    expect(store.state.identities.tabs).toEqual({});
+    expect(store.state.identities.groups).toEqual({});
+    expect(store.state.current.snapshotId).toBe("previous-capture");
+    expect(store.state.operation.browserSession).toBe("session");
+    expect(store.state.sync.dirty).toBe(true);
+  });
+  it("invalidates copied local mappings when an existing session marker differs", async () => {
+    sessionStore.browserSession = "another-browser-session";
+    store.state.identities.windows = { "41": "copied-window" };
+    await import("../src/background");
+    await send({ type: "GET_STATE" });
+    expect(store.state.identities.browserSession).toBe(
+      "another-browser-session",
+    );
+    expect(store.state.identities.windows).toEqual({});
+  });
   it("durably stores pending version before network and advances revision only after success", async () => {
     const { sync } = await import("../src/background");
     publish.mockImplementation(async (s: Snapshot) => {
