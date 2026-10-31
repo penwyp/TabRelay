@@ -1,5 +1,23 @@
+export type TextRef = {
+  ownerDeviceId: string;
+  objectId: string;
+  bytes: number;
+  observedAt: string;
+  captureUrl: string;
+};
+export type TabContent = {
+  status:
+    | "available"
+    | "disabled"
+    | "permission-denied"
+    | "unavailable"
+    | "truncated";
+  ref?: TextRef;
+  reason?: string;
+};
 export type Origin = { deviceId: string; tabKey: string };
 export type Tab = {
+  content?: TabContent;
   tabKey: string;
   url: string;
   title: string;
@@ -31,7 +49,7 @@ export type WorkspaceWindow = {
   tabs: Tab[];
 };
 export type Snapshot = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   deviceId: string;
   snapshotId: string;
   revision: number;
@@ -39,6 +57,9 @@ export type Snapshot = {
   windows: WorkspaceWindow[];
 };
 export type Settings = {
+  syncIntervalMinutes?: 5 | 10 | 30 | 60 | 1440;
+  contentEnabled?: boolean;
+  contentOrigins?: string[];
   /** Explicit HTTP plaintext-risk acknowledgment, bound to configured origin. */
   httpAcknowledgedOrigin?: string;
   endpoint: string;
@@ -119,12 +140,15 @@ export type RuntimeIdentity = {
       url: string;
       windowKey: string;
       index: number;
+      content?: TabContent;
     }
   >;
   windows: Record<string, string>;
   groups: Record<string, string>;
 };
 export type SyncState = {
+  nextDueAt?: number;
+  lastAttempt?: string;
   dirty: boolean;
   generation: number;
   revision: number;
@@ -138,6 +162,18 @@ export type SyncState = {
   retryCount: number;
 };
 export type AppState = {
+  contentObjectEndpoint?: string;
+  contentCaptureCursor?: number;
+  contentCapture?: {
+    sampled: number;
+    eligible: number;
+    skipped: number;
+    failed: number;
+    remaining: number;
+    objectCount?: number;
+    limit: number;
+    updatedAt: string;
+  };
   deviceId: string;
   settings: Settings;
   sync: SyncState;

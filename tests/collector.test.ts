@@ -83,7 +83,8 @@ describe("collector with simulated Chrome APIs", () => {
     mod = await import("../src/collector");
     const second = await mod.collect();
     expect(second.windows[0]).toEqual(first.windows[0]);
-    expect(second.snapshotId).not.toBe(first.snapshotId);
+    expect(second.snapshotId).toMatch(/^\d{8}-\d{6}Z-r\d{12}$/);
+    expect(second.revision).toBe(first.revision); // Repeated collection is not a published revision.
     expect(second.windows[0].groups[0]).toMatchObject({
       title: "Research",
       color: "blue",

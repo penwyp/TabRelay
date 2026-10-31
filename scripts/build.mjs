@@ -23,17 +23,23 @@ await fs.cp("public", out, { recursive: true });
 const manifest = {
   manifest_version: 3,
   name: "TabRelay",
-  version: "1.2.0",
+  version: "2.0.0",
   description:
     "通过 WebDAV 接力多设备标签与标签组，保留本机窗口，安全合并恢复。",
   minimum_chrome_version: "120",
-  permissions: ["tabs", "tabGroups", "storage", "alarms", "sidePanel"],
+  permissions: [
+    "tabs",
+    "tabGroups",
+    "storage",
+    "alarms",
+    ...(testing ? ["scripting"] : []),
+  ],
+  optional_permissions: testing ? [] : ["scripting"],
   optional_host_permissions: ["https://*/*", "http://*/*"],
   ...(testing
     ? { host_permissions: ["http://127.0.0.1/*", "https://127.0.0.1/*"] }
     : {}),
   background: { service_worker: "background.js", type: "module" },
-  side_panel: { default_path: "sidepanel.html" },
   options_ui: { page: "options.html", open_in_tab: true },
   icons: {
     16: "icons/icon-16.png",

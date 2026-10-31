@@ -5,7 +5,7 @@ import {
   WebDAVError,
   WebDAVRepository,
 } from "../src/webdav";
-import type { Device, Settings, Snapshot } from "../src/types";
+import type { Device, Settings, Snapshot, TextRef } from "../src/types";
 
 const settings: Settings = {
   endpoint: "https://dav.example/base/",
@@ -181,6 +181,17 @@ describe("WebDAV publication and failure behavior", () => {
     expect(await repo.listHistory("device-A")).toEqual([
       "000000000001-snap-1.json",
     ]);
+  });
+  it("does not send WebDAV credentials after browser host permission is revoked", async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("chrome", {
+      permissions: { contains: vi.fn(async () => false) },
+    });
+    await expect(
+      new WebDAVRepository(settings).connectionTest(),
+    ).rejects.toMatchObject({ code: "permission-denied" });
+    expect(fetcher).not.toHaveBeenCalled();
   });
   it("never follows redirects or sends browser cookies", async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
@@ -591,5 +602,252 @@ describe("WebDAV publication and failure behavior", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe("http://dav.office.example/base/");
+  });
+  it("publishes readable v2 history IDs and sorts mixed legacy/new revisions numerically", async () => {
+    dav();
+    const repo = new WebDAVRepository({ ...settings, historyLimit: 10 });
+    const old = await repo.publish(snapshot(1), device);
+    const v2: Snapshot = {
+      ...snapshot(2),
+      schemaVersion: 2,
+      snapshotId: "20261031-100000Z-r000002",
+    };
+    const next = await repo.publish(v2, device, old.etag);
+    const v3: Snapshot = {
+      ...snapshot(3),
+      schemaVersion: 2,
+      snapshotId: "20261030-100000Z-r000003",
+    };
+    await repo.publish(v3, device, next.etag);
+    expect(await repo.listHistory("device-A")).toEqual([
+      "20261030-100000Z-r000003.json",
+      "20261031-100000Z-r000002.json",
+      "000000000001-snap-1.json",
+    ]);
+    expect(
+      await repo.readSnapshot(
+        "device-A",
+        "history",
+        "20261031-100000Z-r000002.json",
+      ),
+    ).toEqual(v2);
+    expect(
+      (
+        await repo.readSnapshot(
+          "device-A",
+          "history",
+          "000000000001-snap-1.json",
+        )
+      ).schemaVersion,
+    ).toBe(1);
+  });
+  it.each([
+    "20261331-100000Z-r000002",
+    "20260230-100000Z-r000002",
+    "20261031-100000Z-r000003",
+    "../../current",
+  ])(
+    "rejects malformed or revision-mismatched v2 snapshot ID %s",
+    async (snapshotId) => {
+      const server = dav();
+      const repo = new WebDAVRepository(settings);
+      await expect(
+        repo.publish({ ...snapshot(2), schemaVersion: 2, snapshotId }, device),
+      ).rejects.toMatchObject({ code: "invalid-data" });
+      expect(server.calls).toHaveLength(0);
+    },
+  );
+  it("stores immutable text once and verifies bytes, content and derived owner path", async () => {
+    const server = dav(),
+      repo = new WebDAVRepository(settings),
+      text = "正文内容：数据库一致性。";
+    const first = await repo.writeText("device-A", text),
+      second = await repo.writeText("device-A", text);
+    expect(second).toEqual(first);
+    expect(first.objectCount).toBe(1);
+    expect(first.objectId).toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      server.calls.filter(
+        (call) => call.method === "PUT" && call.url.includes("/objects/text/"),
+      ),
+    ).toHaveLength(1);
+    const ref: TextRef = {
+      ownerDeviceId: "device-A",
+      objectId: first.objectId,
+      bytes: first.bytes,
+      observedAt: "2026-10-31T10:00:00Z",
+      captureUrl: "https://example.com/page",
+    };
+    expect(await repo.readText(ref)).toBe(text);
+    await expect(
+      repo.readText({ ...ref, bytes: first.bytes + 1 }),
+    ).rejects.toMatchObject({ code: "integrity" });
+    expect(await repo.inspectTextObjects("device-A")).toEqual({
+      count: 1,
+      limit: 1000,
+    });
+    const before = server.calls.length;
+    await expect(
+      repo.readText({ ...ref, ownerDeviceId: "../evil" }),
+    ).rejects.toMatchObject({ code: "invalid-data" });
+    await expect(
+      repo.readText({ ...ref, objectId: "https://evil.example/stolen" }),
+    ).rejects.toMatchObject({ code: "invalid-data" });
+    await expect(
+      repo.readText({ ...ref, captureUrl: "javascript:alert(1)" }),
+    ).rejects.toMatchObject({ code: "invalid-data" });
+    expect(server.calls.length).toBe(before);
+  });
+  it("rejects mismatched content in an immutable text object instead of overwriting it", async () => {
+    const server = dav(),
+      repo = new WebDAVRepository(settings),
+      text = "Original";
+    const item = await repo.writeText("device-A", text);
+    const path =
+      settings.endpoint +
+      `tabrelay/v1/devices/device-A/objects/text/${item.objectId}.json`;
+    server.files.set(path, {
+      body: JSON.stringify({
+        schemaVersion: 1,
+        extractionVersion: 1,
+        text: "Tampered",
+      }),
+      etag: '"tampered"',
+    });
+    await expect(repo.writeText("device-A", text)).rejects.toMatchObject({
+      code: "integrity",
+    });
+    expect(JSON.parse(server.files.get(path)!.body).text).toBe("Tampered");
+  });
+  it("encrypts body payload and uses keyed per-device IDs without a raw content hash", async () => {
+    const server = dav(),
+      plain = new WebDAVRepository(settings),
+      repo = new WebDAVRepository({
+        ...settings,
+        encryptionPassphrase: "encryption password",
+      }),
+      text = "Unique private webpage body.";
+    const plainId = await plain.textObjectId("device-A", text);
+    const item = await repo.writeText("device-A", text);
+    expect(item.objectId).not.toBe(plainId);
+    expect(await repo.textObjectId("device-B", text)).not.toBe(item.objectId);
+    const path =
+      settings.endpoint +
+      `tabrelay/v1/devices/device-A/objects/text/${item.objectId}.json`;
+    const body = server.files.get(path)!.body;
+    expect(body).not.toContain(text);
+    expect(body).not.toContain(plainId);
+    const ref: TextRef = {
+      ownerDeviceId: "device-A",
+      objectId: item.objectId,
+      bytes: item.bytes,
+      observedAt: "2026-10-31T10:00:00Z",
+      captureUrl: "https://example.com/page",
+    };
+    expect(await repo.readText(ref)).toBe(text);
+    await expect(
+      new WebDAVRepository({
+        ...settings,
+        encryptionPassphrase: "wrong password",
+      }).readText(ref),
+    ).rejects.toMatchObject({ code: "encryption" });
+    const replay =
+      settings.endpoint +
+      `tabrelay/v1/devices/device-B/objects/text/${item.objectId}.json`;
+    server.files.set(replay, { body, etag: '"copied"' });
+    await expect(
+      repo.readText({ ...ref, ownerDeviceId: "device-B" }),
+    ).rejects.toMatchObject({ code: "encryption" });
+  });
+  it("refuses text beyond character bounds before sending requests", async () => {
+    const server = dav(),
+      repo = new WebDAVRepository(settings);
+    await expect(
+      repo.writeText("device-A", "x".repeat(20001)),
+    ).rejects.toMatchObject({ code: "limit" });
+    expect(server.calls).toHaveLength(0);
+  });
+  it("enforces the per-device 1000-object cap and never garbage-collects bodies", async () => {
+    const server = dav(),
+      repo = new WebDAVRepository(settings);
+    const prefix =
+      settings.endpoint + "tabrelay/v1/devices/device-A/objects/text/";
+    for (let n = 0; n < 1000; n++)
+      server.files.set(prefix + n.toString(16).padStart(64, "0") + ".json", {
+        body: "{}",
+        etag: `"object-${n}"`,
+      });
+    expect(await repo.inspectTextObjects("device-A")).toEqual({
+      count: 1000,
+      limit: 1000,
+    });
+    await expect(
+      repo.writeText("device-A", "One more unique object"),
+    ).rejects.toMatchObject({ code: "text-limit" });
+    expect(
+      server.calls.some(
+        (call) => call.method === "PUT" && call.url.includes("/objects/text/"),
+      ),
+    ).toBe(false);
+    expect(server.calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+  it("keeps v2 metadata when body references are malformed without fetching them", async () => {
+    const value: Snapshot = {
+      ...snapshot(),
+      schemaVersion: 2,
+      snapshotId: "20261031-100000Z-r000001",
+    };
+    value.windows[0].tabs[0].content = {
+      status: "available",
+      ref: {
+        ownerDeviceId: "../secret",
+        objectId: "bad",
+        bytes: 1,
+        observedAt: "bad",
+        captureUrl: "https://evil.example/",
+      },
+    };
+    const fetcher = vi.fn(
+      async () => new Response(JSON.stringify(value), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const result = await new WebDAVRepository(settings).readSnapshot(
+      "device-A",
+    );
+    expect(result.windows[0].tabs[0].url).toBe("https://example.org/");
+    expect(result.windows[0].tabs[0].content?.status).toBe("unavailable");
+    expect(result.windows[0].tabs[0].content?.ref).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("accepts v2 content refs but rejects unsafe references before publication", async () => {
+    const server = dav(),
+      repo = new WebDAVRepository(settings),
+      item = await repo.writeText("device-A", "Stored before publish");
+    const value: Snapshot = {
+      ...snapshot(),
+      schemaVersion: 2,
+      snapshotId: "20261031-100000Z-r000001",
+    };
+    value.windows[0].tabs[0].content = {
+      status: "available",
+      ref: {
+        ownerDeviceId: "device-A",
+        objectId: item.objectId,
+        bytes: item.bytes,
+        observedAt: "2026-10-31T10:00:00Z",
+        captureUrl: "https://example.org/",
+      },
+    };
+    await repo.publish(value, device);
+    expect(
+      (await repo.readSnapshot("device-A")).windows[0].tabs[0].content,
+    ).toEqual(value.windows[0].tabs[0].content);
+    const bad = structuredClone(value);
+    bad.windows[0].tabs[0].content!.ref!.objectId = "../secrets";
+    const before = server.calls.length;
+    await expect(repo.publish(bad, device)).rejects.toMatchObject({
+      code: "invalid-data",
+    });
+    expect(server.calls.length).toBe(before);
   });
 });

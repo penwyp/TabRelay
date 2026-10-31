@@ -1,5 +1,10 @@
 import type { AppState, Settings } from "./types";
-type ConnectionSettings = Settings & { httpAcknowledgedOrigin?: string };
+type ConnectionSettings = Settings & {
+  httpAcknowledgedOrigin?: string;
+  syncIntervalMinutes?: number;
+  contentEnabled?: boolean;
+  contentOrigins?: string[];
+};
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
   if (!element) throw new Error(`Missing UI element: ${id}`);
@@ -61,8 +66,48 @@ function readSettings(): ConnectionSettings {
   const historyLimit = Number(input("history-limit").value);
   if (!Number.isInteger(historyLimit) || historyLimit < 1 || historyLimit > 100)
     throw new Error("历史快照保留数应为 1–100。");
+  const syncIntervalMinutes = Number(
+    $<HTMLSelectElement>("sync-interval").value,
+  );
+  if (![5, 10, 30, 60, 1440].includes(syncIntervalMinutes))
+    throw new Error("请选择受支持的自动同步频率。");
+  const contentEnabled = input("content-enabled").checked;
+  const contentOrigins = [
+    ...new Set(
+      $<HTMLTextAreaElement>("content-origins")
+        .value.split(/\n/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .map((value) => {
+          let origin: URL;
+          try {
+            origin = new URL(value);
+          } catch {
+            throw new Error("正文采集站点必须是完整的 HTTP 或 HTTPS 源。");
+          }
+          if (
+            !["http:", "https:"].includes(origin.protocol) ||
+            origin.hostname.includes("*") ||
+            origin.username ||
+            origin.password ||
+            origin.search ||
+            origin.hash ||
+            !["", "/"].includes(origin.pathname)
+          )
+            throw new Error(
+              "正文采集仅接受明确的 HTTP / HTTPS 源，不允许通配符、路径或账户信息。",
+            );
+          return origin.origin;
+        }),
+    ),
+  ];
+  if (contentEnabled && !contentOrigins.length)
+    throw new Error("启用正文采集前，请填写至少一个允许采集的站点。");
   return {
     endpoint,
+    syncIntervalMinutes: syncIntervalMinutes as 5 | 10 | 30 | 60 | 1440,
+    contentEnabled,
+    contentOrigins,
     username: input("username").value,
     password: input("password").value,
     deviceName,
@@ -94,7 +139,17 @@ async function applySettings(testOnly: boolean) {
     const settings = readSettings();
     // Exact selected scheme + host, requested directly from a user gesture.
     const permission = chrome.permissions.request({
-      origins: [new URL(settings.endpoint).origin + "/*"],
+      origins: [
+        ...new Set([
+          new URL(settings.endpoint).origin + "/*",
+          ...(!testOnly && settings.contentEnabled
+            ? (settings.contentOrigins || []).map((origin) => origin + "/*")
+            : []),
+        ]),
+      ],
+      ...(!testOnly && settings.contentEnabled
+        ? { permissions: ["scripting" as chrome.runtime.ManifestPermissions] }
+        : {}),
     });
     setBusy(true);
     feedback(testOnly ? "正在测试 WebDAV 连接…" : "正在保存设置…");
@@ -107,7 +162,7 @@ async function applySettings(testOnly: boolean) {
     feedback(
       testOnly
         ? "连接成功。确认配置后，点击保存设置。"
-        : "设置已保存。可以关闭此标签页，返回侧边栏继续接力。",
+        : "设置已保存。可以关闭此标签页，点击工具栏图标继续接力。",
     );
   } catch (error) {
     feedback(errorMessage(error), true);
@@ -124,6 +179,13 @@ async function loadSettings() {
     input("username").value = settings.username;
     input("password").value = settings.password;
     input("enabled").checked = settings.enabled;
+    $<HTMLSelectElement>("sync-interval").value = String(
+      settings.syncIntervalMinutes || 10,
+    );
+    input("content-enabled").checked = settings.contentEnabled === true;
+    $<HTMLTextAreaElement>("content-origins").value = (
+      settings.contentOrigins || []
+    ).join("\n");
     $<HTMLTextAreaElement>("blacklist").value = settings.blacklist.join("\n");
     input("strip-params").value = settings.stripParams.join(", ");
     input("history-limit").value = String(settings.historyLimit);

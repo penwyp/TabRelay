@@ -2,21 +2,233 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>TabRelay</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>TabRelay · 搜索工作区</title>
+    <link rel="icon" href="icons/icon-32.png" />
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="search.css" />
   </head>
-  <body class="popup-body">
-    <div class="brand">
-      <img src="icons/icon-48.png" width="36" height="36" alt="" /><span
-        >TabRelay<span class="brand-caption">WORKSPACE RELAY</span></span
+  <body class="search-body workbench-page popup-workbench">
+    <header class="search-topbar">
+      <div class="brand">
+        <img
+          class="brand-icon"
+          src="icons/icon-48.png"
+          width="32"
+          height="32"
+          alt=""
+        /><span
+          >TabRelay<span class="brand-caption">WORKSPACE RELAY</span></span
+        >
+      </div>
+      <div class="workbench-header-actions">
+        <button id="workbench-sync" class="text-button">立即同步</button
+        ><button
+          id="workbench-settings"
+          class="icon-button"
+          aria-label="打开设置"
+          title="独立设置页"
+        >
+          ⚙
+        </button>
+      </div>
+    </header>
+    <main class="search-layout">
+      <section class="search-hero">
+        <div class="eyebrow">FIND YOUR WORKSPACE</div>
+        <h1>搜索工作区，接着开始。</h1>
+        <p>自动检索设备快照、恢复点和历史版本。</p>
+        <form id="search-form" class="search-box" role="search">
+          <span aria-hidden="true">⌕</span
+          ><input
+            id="search-query"
+            autofocus
+            type="search"
+            maxlength="512"
+            autocomplete="off"
+            placeholder="搜索标题、网址、标签组或授权正文"
+            aria-label="搜索已加载快照"
+          /><button type="submit" class="primary" id="search-submit">
+            搜索
+          </button>
+        </form>
+        <p class="search-method">
+          相同网址聚合显示；操作前选择具体设备与快照。正文仅覆盖已授权采集的内容。
+        </p>
+      </section>
+      <section class="search-scope" aria-label="搜索覆盖范围">
+        <div class="scope-top">
+          <div>
+            <h2>
+              搜索覆盖范围
+              <span id="coverage-badge" class="scope-badge">未加载</span>
+            </h2>
+            <p id="coverage-summary">
+              正在读取可用索引，后台会逐步补充当前快照、恢复点及历史版本。
+            </p>
+          </div>
+          <div class="scope-actions">
+            <button id="load-snapshots" class="secondary">刷新</button
+            ><button id="rebuild-cache" class="primary" hidden>
+              重建搜索缓存</button
+            ><button id="cancel-load" class="secondary" hidden>暂停</button
+            ><button id="clear-cache" class="text-button danger">
+              清空本机搜索缓存
+            </button>
+          </div>
+        </div>
+        <div id="loading-progress" class="progress-track" hidden>
+          <div id="loading-progress-fill" class="progress-fill"></div>
+        </div>
+        <div class="coverage-foot">
+          <span id="coverage-observed">快照记录时间不代表网页访问时间。</span
+          ><span id="coverage-updated"></span>
+        </div>
+        <div id="coverage-warning" class="scope-warning" hidden></div>
+        <details id="source-details">
+          <summary>查看加载范围与失败原因</summary>
+          <div id="source-list" class="source-list"></div>
+        </details>
+      </section>
+      <div class="workbench-local">
+        <span id="workbench-sync-status">正在读取本机状态…</span
+        ><span id="workbench-next-sync"></span>
+      </div>
+      <details id="device-workspaces" class="workbench-details">
+        <summary>
+          设备与整组窗口恢复 <span id="workbench-device-count"></span>
+        </summary>
+        <div id="workbench-device-list"></div>
+      </details>
+      <section
+        id="workbench-operation"
+        class="workbench-operation"
+        hidden
+        aria-live="polite"
       >
-    </div>
-    <p id="popup-status" class="muted">正在读取同步状态…</p>
-    <button id="open-panel" class="primary wide">打开工作区接力 →</button>
-    <button id="open-settings" class="wide">打开独立设置页</button>
-    <button id="open-search" class="wide">统一搜索标签与快照</button>
-    <p id="popup-error" class="inline-error" hidden></p>
+        <div class="section-heading">
+          <h2 id="workbench-operation-title">恢复进度</h2>
+          <span id="workbench-operation-status" class="pill"></span>
+        </div>
+        <div class="progress-track">
+          <div id="workbench-operation-fill" class="progress-fill"></div>
+        </div>
+        <p id="workbench-operation-detail"></p>
+        <p id="workbench-operation-error" class="inline-error" hidden></p>
+        <div class="button-row">
+          <button id="workbench-cancel-restore" class="secondary" hidden>
+            停止后续创建</button
+          ><button id="workbench-resume-restore" class="secondary" hidden>
+            继续恢复
+          </button>
+        </div>
+      </section>
+      <p id="body-coverage" class="body-coverage">正文覆盖范围正在读取。</p>
+      <div id="search-notice" class="notice" role="status" hidden></div>
+      <div class="search-content">
+        <details class="workbench-filter-details">
+          <summary>筛选设备、时间与标签属性</summary>
+          <aside class="search-filters" aria-label="筛选">
+            <div class="filter-heading">
+              <h2>筛选</h2>
+              <button id="reset-filters" class="text-button">重置</button>
+            </div>
+            <label class="search-field"
+              >设备<select id="filter-device">
+                <option value="">全部已加载设备</option>
+              </select></label
+            ><label class="search-field"
+              >快照类型<select id="filter-kind">
+                <option value="">全部已加载类型</option>
+                <option value="current">当前快照</option>
+                <option value="history">恢复点 / 历史版本</option>
+              </select></label
+            ><label class="search-field"
+              >域名<input
+                id="filter-domain"
+                type="text"
+                placeholder="域名或其子域名，例如 example.com" /></label
+            ><label class="search-field"
+              >标签组<input
+                id="filter-group"
+                type="text"
+                placeholder="包含的组名" /></label
+            ><label class="filter-checkbox"
+              ><input id="filter-pinned" type="checkbox" />
+              仅显示置顶标签</label
+            >
+            <div class="filter-divider"></div>
+            <div class="date-filter-label">快照观察时间</div>
+            <label class="search-field"
+              >从<input id="filter-after" type="date" /></label
+            ><label class="search-field"
+              >到<input id="filter-before" type="date"
+            /></label>
+            <p class="filter-note">
+              日期按本机时区计算，过滤快照记录时间，不是浏览历史或访问时间。
+            </p>
+            <label class="search-field"
+              >最多显示<select id="result-limit">
+                <option value="50">50 条</option>
+                <option value="100" selected>100 条</option>
+                <option value="200">200 条</option>
+              </select></label
+            >
+            <p class="filter-note">
+              先对全部已加载记录应用筛选，再限制显示数量。
+            </p>
+          </aside>
+        </details>
+        <section class="search-results-section" aria-label="搜索结果">
+          <div class="results-heading">
+            <h2 id="results-title">已加载范围的搜索结果</h2>
+            <span id="result-count"></span>
+          </div>
+          <p id="result-explanation" class="result-explanation">
+            数据仍在各设备快照中。加载只建立临时搜索索引，不会打开或关闭标签。
+          </p>
+          <div id="search-results" class="search-results">
+            <div class="search-empty">
+              <span aria-hidden="true">⌕</span>
+              <h3>还没有可搜索的快照</h3>
+              <p>正在逐步建立索引。未加载、失败和暂停的范围不计入搜索。</p>
+            </div>
+          </div>
+        </section>
+      </div>
+      <footer class="search-footer">
+        本机搜索缓存 · 正文需明确授权 · 恢复始终需要确认
+      </footer>
+    </main>
+    <dialog id="search-restore-dialog">
+      <div class="dialog-heading">
+        <div>
+          <div class="eyebrow">RESTORE PREVIEW</div>
+          <h2>确认恢复到新窗口</h2>
+        </div>
+        <button
+          id="search-restore-close"
+          class="icon-button"
+          aria-label="关闭恢复预览"
+        >
+          ×
+        </button>
+      </div>
+      <p id="search-plan-source" class="muted"></p>
+      <p id="search-plan-time" class="field-hint"></p>
+      <div id="search-plan-stats" class="plan-stats"></div>
+      <p id="search-plan-existing" class="preserve-note"></p>
+      <div id="search-plan-skipped" class="skipped-list"></div>
+      <p class="field-hint">
+        恢复使用当前固定的快照，不会关闭或替换本机原有窗口。合并结果将按同步设置重新发布。
+      </p>
+      <div class="dialog-actions">
+        <button id="search-restore-back" class="secondary">返回</button
+        ><button id="search-confirm-restore" class="primary">
+          确认新增窗口
+        </button>
+      </div>
+    </dialog>
     <script src="popup.js" type="module"></script>
   </body>
 </html>

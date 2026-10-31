@@ -3,7 +3,11 @@ import type { AppState } from "./types";
 let queue: Promise<unknown> = Promise.resolve();
 export async function load(): Promise<AppState> {
   const result = await chrome.storage.local.get("state");
-  if (result.state) return result.state as AppState;
+  if (result.state) {
+    const state = result.state as AppState;
+    state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
+    return state;
+  }
   const state: AppState = {
     deviceId: crypto.randomUUID(),
     settings: { ...DEFAULT_SETTINGS },

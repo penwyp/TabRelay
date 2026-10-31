@@ -38,7 +38,10 @@
           </div>
           <div>
             <span>03</span><strong>数据由你掌控</strong>
-            <p>不读取网页内容，不同步 Cookie 或无痕窗口。</p>
+            <p>
+              正文采集默认关闭；仅在授权站点采集可见文字，不同步 Cookie
+              或无痕窗口。
+            </p>
           </div>
         </div>
       </aside>
@@ -102,6 +105,50 @@
               ><input id="enabled" type="checkbox" />
               自动同步本机所有普通窗口</label
             >
+            <label class="field"
+              >自动同步频率
+              <select
+                id="sync-interval"
+                class="secondary wide"
+                aria-label="自动同步频率"
+              >
+                <option value="5">每 5 分钟</option>
+                <option value="10" selected>每 10 分钟（默认）</option>
+                <option value="30">每 30 分钟</option>
+                <option value="60">每小时</option>
+                <option value="1440">每天</option>
+              </select>
+            </label>
+            <details class="privacy-settings" id="content-settings">
+              <summary>正文搜索（默认关闭）</summary>
+              <div class="privacy-note">
+                开启后，将读取你明确授权站点的可见正文，用于跨设备正文搜索。可见文字可能包含商业秘密、聊天或其他敏感信息；请只授权你愿意采集的站点。不采集表单字段、密码框、可编辑区域或无痕页面，不承诺能识别所有敏感文字。
+              </div>
+              <label class="toggle-line"
+                ><input
+                  id="content-enabled"
+                  type="checkbox"
+                />我了解风险，启用以下站点的正文采集</label
+              >
+              <label class="field"
+                >允许采集的站点（每行一个完整源）<textarea
+                  id="content-origins"
+                  rows="3"
+                  placeholder="https://docs.example.com&#10;https://wiki.example.com"
+                  aria-describedby="content-origin-hint"
+                ></textarea>
+              </label>
+              <p id="content-origin-hint" class="field-hint">
+                仅接受明确的 HTTP / HTTPS
+                源（协议＋主机＋可选端口），不允许通配符或路径。点击保存时只申请这些站点及
+                scripting 权限；不会申请所有网站。
+              </p>
+              <p class="field-hint">
+                正文按快照的加密策略保存：设置加密口令后加密；未设置则不加密。远端正文对象最多保留
+                1000
+                个，达到上限停止新增，不自动清理。关闭采集或清空本机搜索缓存，不会删除远端正文或快照。
+              </p>
+            </details>
             <details class="privacy-settings">
               <summary>隐私与保留策略</summary>
               <label class="field"
@@ -139,7 +186,7 @@
             <div class="privacy-note">
               标签 URL 可能包含登录令牌等敏感信息。请使用可信
               WebDAV，并配置需要移除的参数。不会同步
-              Cookie、表单、页面内容或无痕窗口。
+              Cookie、表单字段或无痕窗口。正文只在上方明确开启并授权站点后采集。
             </div>
           </fieldset>
           <p

@@ -14,6 +14,9 @@ export const LIMITS = {
   url: 16000,
 };
 export const DEFAULT_SETTINGS: Settings = {
+  syncIntervalMinutes: 10,
+  contentEnabled: false,
+  contentOrigins: [],
   endpoint: "",
   username: "",
   password: "",
@@ -69,7 +72,7 @@ export function validateSnapshot(value: unknown): Snapshot {
   )
     throw Error("快照格式无效或超过 5 MB 限制");
   if (
-    value.schemaVersion !== 1 ||
+    ![1, 2].includes(Number(value.schemaVersion)) ||
     !str(value.deviceId) ||
     !str(value.snapshotId) ||
     !Number.isSafeInteger(value.revision) ||
@@ -170,7 +173,49 @@ export function validateSnapshot(value: unknown): Snapshot {
   }
   if (count > LIMITS.tabs || groups > LIMITS.groups)
     throw Error("标签或标签组数量超限");
-  return structuredClone(value) as unknown as Snapshot;
+  const result = structuredClone(value) as unknown as Snapshot;
+  for (const w of result.windows)
+    for (const t of w.tabs) {
+      if (t.content) {
+        if (
+          ![
+            "available",
+            "truncated",
+            "disabled",
+            "permission-denied",
+            "unavailable",
+          ].includes(t.content.status) ||
+          (["available", "truncated"].includes(t.content.status) &&
+            !validTextRef(t.content.ref, t.url))
+        ) {
+          t.content = {
+            status: "unavailable",
+            reason: "正文引用缺失、无效或与标签URL不符",
+          };
+        } else {
+          const ref = t.content.ref;
+          t.content = {
+            status: t.content.status,
+            ...(typeof t.content.reason === "string"
+              ? { reason: t.content.reason.slice(0, 400) }
+              : {}),
+            ...(["available", "truncated"].includes(t.content.status) &&
+            validTextRef(ref, t.url)
+              ? {
+                  ref: {
+                    ownerDeviceId: ref.ownerDeviceId,
+                    objectId: ref.objectId,
+                    bytes: ref.bytes,
+                    observedAt: ref.observedAt,
+                    captureUrl: ref.captureUrl,
+                  },
+                }
+              : {}),
+          };
+        }
+      }
+    }
+  return result;
 }
 export function contentIdentity(t: {
   url: string;
@@ -252,8 +297,58 @@ export async function makePlan(
     createdAt: new Date().toISOString(),
   };
 }
+export function readableSnapshotId(date: Date, revision: number): string {
+  return (
+    date.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15) +
+    "Z-r" +
+    String(revision).padStart(12, "0")
+  );
+}
+export function validTextRef(
+  ref: unknown,
+  url?: string,
+): ref is import("./types").TextRef {
+  return (
+    obj(ref) &&
+    typeof ref.ownerDeviceId === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(ref.ownerDeviceId) &&
+    typeof ref.objectId === "string" &&
+    /^[a-f0-9]{64}$/.test(ref.objectId) &&
+    Number.isSafeInteger(ref.bytes) &&
+    Number(ref.bytes) >= 0 &&
+    Number(ref.bytes) <= 60000 &&
+    typeof ref.observedAt === "string" &&
+    Number.isFinite(Date.parse(ref.observedAt)) &&
+    typeof ref.captureUrl === "string" &&
+    safeUrl(ref.captureUrl) === ref.captureUrl &&
+    (!url || ref.captureUrl === url)
+  );
+}
 export function checkSettings(raw: Settings): Settings {
   const s = { ...DEFAULT_SETTINGS, ...raw };
+  if (![5, 10, 30, 60, 1440].includes(Number(s.syncIntervalMinutes)))
+    throw Error("同步间隔必须为5/10/30分钟、1小时或1天");
+  s.contentEnabled = s.contentEnabled === true;
+  if (!Array.isArray(s.contentOrigins) || s.contentOrigins.length > 100)
+    throw Error("正文站点授权数量无效");
+  s.contentOrigins = [
+    ...new Set(
+      s.contentOrigins.map((value) => {
+        const u = new URL(String(value));
+        if (
+          !["http:", "https:"].includes(u.protocol) ||
+          u.username ||
+          u.password ||
+          u.search ||
+          u.hash ||
+          u.pathname !== "/" ||
+          u.hostname.includes("*")
+        )
+          throw Error("正文站点必须是明确HTTP/HTTPS origin，不含路径或凭据");
+        return u.origin;
+      }),
+    ),
+  ];
   s.deviceName = s.deviceName.trim().slice(0, 80) || "我的设备";
   if (s.endpoint) {
     const u = new URL(s.endpoint);

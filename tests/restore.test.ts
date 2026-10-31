@@ -133,6 +133,38 @@ beforeEach(() => {
   vi.stubGlobal("chrome", api);
 });
 describe("restore journal with simulated Chrome APIs", () => {
+  it("preserves remote text-object ownership when restored into another device", async () => {
+    const value = source(1);
+    value.schemaVersion = 2;
+    value.snapshotId = "20261031-000000Z-r000000000001";
+    value.windows[0].tabs[0].content = {
+      status: "available",
+      ref: {
+        ownerDeviceId: "remote-A",
+        objectId: "a".repeat(64),
+        bytes: 20,
+        observedAt: value.capturedAt,
+        captureUrl: value.windows[0].tabs[0].url,
+      },
+    };
+    const { makePlan } = await import("../src/model");
+    const { prepare, execute } = await import("../src/restore");
+    const p = await makePlan(value, {
+      ...source(0),
+      deviceId: "local-B",
+      windows: [],
+    });
+    await prepare(p);
+    await execute();
+    const restored = store.state.operation.createdTabs[0];
+    expect(
+      store.state.identities.tabs[String(restored.tabId)].content.ref
+        .ownerDeviceId,
+    ).toBe("remote-A");
+    expect(store.state.identities.tabs[String(restored.tabId)].content).toEqual(
+      value.windows[0].tabs[0].content,
+    );
+  });
   it("creates new windows, leaves originals untouched and restores pin/group/active metadata", async () => {
     const original = copy([...tabs.values()]);
     const mod = await import("../src/restore");

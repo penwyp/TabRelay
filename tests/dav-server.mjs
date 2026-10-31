@@ -11,6 +11,21 @@ export async function startDav() {
     const url = new URL(req.url, "http://localhost"),
       path = url.pathname;
     requests.push({ method: req.method, path });
+    if (path === "/fixture/body-privacy") {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.end(`<!doctype html><html><head><title>公开研究笔记</title>
+        <style>.hidden-css{display:none}.invisible-css{visibility:hidden}</style></head>
+        <body><main><h1>研究资料</h1><p>量子陀螺导航的低温校准采用蓝宝石谐振腔。</p>
+        <p>Visible English body marker sapphire-resonator-protocol.</p></main>
+        <input value="SECRET_INPUT_739"><textarea>SECRET_TEXTAREA_739</textarea>
+        <div contenteditable="true">SECRET_EDITABLE_739</div>
+        <form><p>SECRET_FORM_739</p><select><option>SECRET_SELECT_739</option></select></form>
+        <div hidden>SECRET_HIDDEN_739</div><div class="hidden-css">SECRET_CSS_739</div>
+        <div class="invisible-css">SECRET_INVISIBLE_739</div>
+        <script>window.fixtureSecret="SECRET_SCRIPT_739"</script>
+        <noscript>SECRET_NOSCRIPT_739</noscript></body></html>`);
+      return;
+    }
     if (path.startsWith("/fixture/")) {
       res.setHeader("Content-Type", "text/html");
       res.end(

@@ -1,5 +1,8 @@
+import { captureSnapshotText } from "./content";
 import {
   searchStatus,
+  autoSearch,
+  rebuildSearch,
   loadSearch,
   cancelSearch,
   clearSearch,
@@ -62,30 +65,42 @@ const ready = (async () => {
   });
   await interruptOnBoot();
   await chrome.alarms.create("tabrelay-reconcile", { periodInMinutes: 0.5 });
-  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  await update((s) => {
+    if (!Number.isFinite(s.sync.nextDueAt))
+      s.sync.nextDueAt =
+        Date.now() + (s.settings.syncIntervalMinutes || 10) * 60000;
+  });
 })();
 async function mark() {
   await ready;
   await dirty();
-  clearTimeout(timer);
-  timer = setTimeout(() => void sync().catch(() => {}), 3000);
+  // Dirty state is durable immediately; automatic publication waits for nextDueAt.
 }
 function safeError(e: unknown) {
   return e instanceof Error ? e.message.slice(0, 400) : "操作失败，请重试";
 }
-export async function sync(force = false) {
+export async function sync(force = false, followPendingWithCurrent = true) {
   await ready;
   if (syncing || isRestoring() || commandBusy) return;
   if (Date.now() < startupUntil && !force) return;
   syncing = true;
+  let publishLatestAfterPending = false;
   try {
     let s = await load();
     if (!s.settings.enabled || !s.settings.endpoint || s.sync.pausedConflict)
       return;
-    if (!force && !s.sync.dirty) return;
+    if (!force && Date.now() < (s.sync.nextDueAt || 0)) return;
+    if (!force && !s.sync.dirty && !s.settings.contentEnabled) return;
+    await update((x) => {
+      x.sync.lastAttempt = new Date().toISOString();
+      x.sync.nextDueAt =
+        Date.now() + (x.settings.syncIntervalMinutes || 10) * 60000;
+    });
     const generation = s.sync.generation;
     const retrying = !!s.sync.pending;
-    const send = validateSnapshot(s.sync.pending || (await collect()));
+    const send = validateSnapshot(
+      s.sync.pending || (await captureSnapshotText(await collect())),
+    );
     s = await load();
     const digest = await hash({
       windows: send.windows,
@@ -141,6 +156,7 @@ export async function sync(force = false) {
       )
         x.operation.syncStatus = "synced";
     });
+    publishLatestAfterPending = force && retrying && followPendingWithCurrent;
   } catch (e) {
     await update((s) => {
       s.sync.error = safeError(e);
@@ -152,6 +168,7 @@ export async function sync(force = false) {
   } finally {
     syncing = false;
   }
+  if (publishLatestAfterPending) await sync(true, false);
 }
 async function handle(m: any) {
   const exclusive = [
@@ -161,6 +178,7 @@ async function handle(m: any) {
     "UNDO_RESTORE",
     "SEARCH_PLAN",
     "SEARCH_LOAD",
+    "SEARCH_REBUILD",
     "SEARCH_CLEAR",
     "SEARCH_CANCEL",
     "SEARCH_LOCATE",
@@ -194,18 +212,61 @@ async function handleInner(m: any) {
         }))
       )
         throw Error("请先授权此 WebDAV 主机");
+      if (settings.contentEnabled) {
+        if (!settings.contentOrigins?.length)
+          throw Error("请先选择允许正文采集的具体站点");
+        for (const origin of settings.contentOrigins)
+          if (
+            !(await chrome.permissions.contains({
+              permissions: ["scripting"],
+              origins: [origin + "/*"],
+            }))
+          )
+            throw Error("请明确授予所选站点的正文读取权限");
+      }
       await update((s) => {
         if (syncing || isRestoring())
           throw Error("同步或恢复正在进行，请稍后保存配置");
         const changed = s.settings.endpoint !== settings.endpoint;
         if (
           !changed &&
-          (s.sync.revision > 0 || s.sync.pending) &&
+          (s.sync.revision > 0 ||
+            s.sync.pending ||
+            s.contentObjectEndpoint === settings.endpoint) &&
           s.settings.encryptionPassphrase !== settings.encryptionPassphrase
         )
           throw Error(
             "此设备已有远端快照。更换加密口令请使用新的 WebDAV 目录，避免旧恢复点无法读取。",
           );
+        if (
+          s.settings.syncIntervalMinutes !== settings.syncIntervalMinutes ||
+          s.settings.enabled !== settings.enabled
+        )
+          s.sync.nextDueAt =
+            Date.now() + (settings.syncIntervalMinutes || 10) * 60000;
+        const bodyPolicyChanged =
+          changed ||
+          s.settings.encryptionPassphrase !== settings.encryptionPassphrase ||
+          s.settings.contentEnabled !== settings.contentEnabled ||
+          JSON.stringify(s.settings.contentOrigins) !==
+            JSON.stringify(settings.contentOrigins) ||
+          JSON.stringify(s.settings.blacklist) !==
+            JSON.stringify(settings.blacklist) ||
+          JSON.stringify(s.settings.stripParams) !==
+            JSON.stringify(settings.stripParams);
+        if (bodyPolicyChanged && !changed && s.sync.pending)
+          throw Error(
+            "尚有待确认的旧快照，不能直接更改隐私/正文策略后重发。请先暂停自动同步并核对待发布结果，或使用新WebDAV目录。",
+          );
+        if (bodyPolicyChanged) {
+          for (const identity of Object.values(s.identities.tabs))
+            delete identity.content;
+          for (const w of s.current?.windows || [])
+            for (const tab of w.tabs) delete tab.content;
+          s.contentCapture = undefined;
+          s.contentCaptureCursor = 0;
+        }
+        if (changed) s.contentObjectEndpoint = undefined;
         s.settings = settings;
         if (changed) {
           s.sync.etag = undefined;
@@ -244,19 +305,24 @@ async function handleInner(m: any) {
       return new WebDAVRepository((await load()).settings).listHistory(
         m.deviceId,
       );
+    case "SEARCH_AUTO":
+      return autoSearch();
+    case "SEARCH_REBUILD":
+      await chrome.storage.local.remove("restorePlan");
+      return rebuildSearch();
     case "SEARCH_STATUS":
       return searchStatus();
     case "SEARCH_QUERY":
       return querySearch(String(m.query || ""), m.filters || {}, m.limit || 50);
     case "SEARCH_LOAD":
       await chrome.storage.local.remove("restorePlan");
-      return loadSearch(m.includeHistory === true);
+      return loadSearch(true);
     case "SEARCH_CANCEL":
       await chrome.storage.local.remove("restorePlan");
       return cancelSearch();
     case "SEARCH_CLEAR":
       await chrome.storage.local.remove("restorePlan");
-      return clearSearch();
+      return clearSearch(true);
     case "SEARCH_LOCATE": {
       const result = await getSearchResult(String(m.resultId));
       const s = await load();
@@ -463,4 +529,26 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 void ready.then(() => {
   timer = setTimeout(() => void sync(), 3500);
+});
+
+chrome.permissions.onRemoved?.addListener(() => {
+  void ready
+    .then(async () => {
+      await chrome.storage.local.remove("restorePlan");
+      await update((s) => {
+        s.settings.enabled = false;
+        s.sync.error =
+          "浏览器权限已撤销，自动同步和搜索已暂停。请检查权限与待发布快照后重新启用。";
+        s.sync.errorCode = "permission-denied";
+        for (const identity of Object.values(s.identities.tabs))
+          delete identity.content;
+        for (const w of s.current?.windows || [])
+          for (const t of w.tabs) delete t.content;
+        s.contentCapture = undefined;
+        s.sync.dirty = true;
+        s.sync.generation++;
+      });
+      await clearSearch(true);
+    })
+    .catch(() => {});
 });

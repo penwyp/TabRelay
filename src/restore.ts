@@ -207,6 +207,7 @@ async function executeInternal(): Promise<void> {
             s.identities.windows[String(windowId)] || crypto.randomUUID();
           s.identities.windows[String(windowId)] = key;
           s.identities.tabs[String(tab!.id)] = {
+            content: t.content,
             key: localTabKey,
             origin: t.origin,
             url: t.url,

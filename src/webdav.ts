@@ -1,10 +1,112 @@
-import type { Device, Settings, Snapshot } from "./types";
+import { validateSnapshot } from "./model";
+import type { Device, Settings, Snapshot, TextRef } from "./types";
 
 const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_DIRECTORY_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT = 15_000;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const HISTORY_FILE = /^\d{12}-[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.json$/;
+const LEGACY_HISTORY_FILE = /^\d{12}-[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.json$/;
+const HUMAN_SNAPSHOT_ID =
+  /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})Z-r(\d{6,12})$/;
+const HISTORY_FILE =
+  /^(?:\d{12}-[A-Za-z0-9][A-Za-z0-9_-]{0,127}|\d{8}-\d{6}Z-r\d{6,12})\.json$/;
+const TEXT_FILE = /^[a-f0-9]{64}\.json$/;
+const TEXT_ID = /^[a-f0-9]{64}$/;
+const TEXT_MAX_CHARS = 20_000;
+const TEXT_MAX_BYTES = 60_000;
+const TEXT_ENVELOPE_BYTES = 200_000;
+const TEXT_OBJECT_LIMIT = 1000;
+type TextObject = { schemaVersion: 1; extractionVersion: 1; text: string };
+function historyRevision(filename: string): number {
+  return LEGACY_HISTORY_FILE.test(filename)
+    ? Number(filename.slice(0, 12))
+    : Number(filename.match(/-r(\d{6,12})\.json$/)?.[1] ?? -1);
+}
+function validHumanSnapshotId(snapshotId: string, revision: number): boolean {
+  const match = HUMAN_SNAPSHOT_ID.exec(snapshotId);
+  if (!match || Number(match[7]) !== revision) return false;
+  const iso = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`;
+  const date = new Date(iso);
+  return (
+    Number.isFinite(date.getTime()) &&
+    date.toISOString().replace(".000Z", "Z") === iso
+  );
+}
+function textObject(text: string): TextObject {
+  if (
+    typeof text !== "string" ||
+    text.length > TEXT_MAX_CHARS ||
+    encoder.encode(text).length > TEXT_MAX_BYTES
+  )
+    fail("limit", "正文对象超过 20,000 字符或 60,000 字节上限。");
+  return { schemaVersion: 1, extractionVersion: 1, text };
+}
+function validateTextRef(ref: TextRef): void {
+  if (
+    !ref ||
+    typeof ref !== "object" ||
+    typeof ref.ownerDeviceId !== "string" ||
+    !SAFE_ID.test(ref.ownerDeviceId) ||
+    !TEXT_ID.test(ref.objectId) ||
+    !Number.isSafeInteger(ref.bytes) ||
+    ref.bytes < 0 ||
+    ref.bytes > TEXT_MAX_BYTES ||
+    typeof ref.observedAt !== "string" ||
+    !Number.isFinite(Date.parse(ref.observedAt))
+  )
+    fail("invalid-data", "正文引用结构无效。");
+  let url: URL;
+  try {
+    url = new URL(ref.captureUrl);
+  } catch {
+    return fail("invalid-data", "正文来源 URL 无效。");
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    ref.captureUrl.length > 16000
+  )
+    fail("invalid-data", "正文来源 URL 无效。");
+}
+function validateContentRefs(snapshot: Snapshot): void {
+  for (const window of snapshot.windows) {
+    if (!window || !Array.isArray(window.tabs))
+      fail("invalid-data", "快照窗口结构无效。");
+    for (const tab of window.tabs) {
+      if (!tab || typeof tab !== "object")
+        fail("invalid-data", "快照标签结构无效。");
+      if (tab.content === undefined) continue;
+      if (
+        snapshot.schemaVersion !== 2 ||
+        !tab.content ||
+        typeof tab.content !== "object" ||
+        ![
+          "available",
+          "disabled",
+          "permission-denied",
+          "unavailable",
+          "truncated",
+        ].includes(tab.content.status) ||
+        (tab.content.reason !== undefined &&
+          (typeof tab.content.reason !== "string" ||
+            tab.content.reason.length > 1000))
+      )
+        fail("invalid-data", "正文状态或快照版本无效。");
+      if (tab.content.ref !== undefined) {
+        if (!["available", "truncated"].includes(tab.content.status))
+          fail("invalid-data", "此正文状态不能包含引用。");
+        validateTextRef(tab.content.ref);
+        if (tab.content.ref.captureUrl !== tab.url)
+          fail("invalid-data", "正文来源URL与标签不匹配。");
+      } else if (
+        tab.content.status === "available" ||
+        tab.content.status === "truncated"
+      )
+        fail("invalid-data", "可用正文缺少引用。");
+    }
+  }
+}
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -25,7 +127,8 @@ function strongETag(value: string | null): value is string {
   return value !== null && /^"[^"\r\n]*"$/.test(value);
 }
 function id(value: string): string {
-  if (!SAFE_ID.test(value)) fail("invalid-data", "设备或快照标识无效。");
+  if (typeof value !== "string" || !SAFE_ID.test(value))
+    fail("invalid-data", "设备或快照标识无效。");
   return value;
 }
 function bytesToBase64(bytes: Uint8Array): string {
@@ -181,7 +284,12 @@ export function parseDavChildren(xml: string, directory: string): URL[] {
     } catch {
       continue;
     }
-    if (!SAFE_ID.test(name) && !HISTORY_FILE.test(name)) continue;
+    if (
+      !SAFE_ID.test(name) &&
+      !HISTORY_FILE.test(name) &&
+      !TEXT_FILE.test(name)
+    )
+      continue;
     children.set(name, child);
   }
   return [...children.values()];
@@ -237,6 +345,14 @@ export class WebDAVRepository {
         "http-consent-required",
         "此 HTTP 服务器尚未确认明文传输风险，已阻止网络请求。",
       );
+    if (
+      typeof chrome !== "undefined" &&
+      chrome.permissions?.contains &&
+      !(await chrome.permissions.contains({ origins: [url.origin + "/*"] }))
+    )
+      fail("permission-denied", "WebDAV主机访问权限已撤销，未发送请求。");
+    if (!this.shouldContinue())
+      fail("cancelled", "加载已取消，未发送后续请求。");
     const headers: Record<string, string> = { ...options.headers };
     if (this.settings.username || this.settings.password)
       headers.Authorization = `Basic ${bytesToBase64(encoder.encode(`${this.settings.username}:${this.settings.password}`))}`;
@@ -451,8 +567,241 @@ export class WebDAVRepository {
         decodeURIComponent(path.pathname.slice(new URL(base).pathname.length)),
       )
       .filter((name) => HISTORY_FILE.test(name))
-      .sort()
-      .reverse();
+      .sort(
+        (a, b) => historyRevision(b) - historyRevision(a) || b.localeCompare(a),
+      );
+  }
+  private textWriteQueue: Promise<unknown> = Promise.resolve();
+  private objectIdKeys = new Map<string, Promise<CryptoKey>>();
+  private objectIdKeyPassphrase?: string;
+  /** Plain stores expose content hashes; encrypted stores use per-device keyed IDs. */
+  async textObjectId(deviceId: string, text: string): Promise<string> {
+    id(deviceId);
+    const canonical = encoder.encode(JSON.stringify(textObject(text)));
+    let digest: ArrayBuffer;
+    if (!this.settings.encryptionPassphrase) {
+      digest = await crypto.subtle.digest("SHA-256", canonical);
+    } else {
+      if (this.objectIdKeyPassphrase !== this.settings.encryptionPassphrase) {
+        this.objectIdKeys.clear();
+        this.objectIdKeyPassphrase = this.settings.encryptionPassphrase;
+      }
+      const domain = `TabRelay/TextObjectId/v1/${deviceId}`;
+      let key = this.objectIdKeys.get(domain);
+      if (!key) {
+        key = (async () => {
+          const raw = await crypto.subtle.importKey(
+            "raw",
+            encoder.encode(this.settings.encryptionPassphrase),
+            "PBKDF2",
+            false,
+            ["deriveKey"],
+          );
+          return crypto.subtle.deriveKey(
+            {
+              name: "PBKDF2",
+              salt: encoder.encode(domain),
+              iterations: 210000,
+              hash: "SHA-256",
+            },
+            raw,
+            { name: "HMAC", hash: "SHA-256", length: 256 },
+            false,
+            ["sign"],
+          );
+        })();
+        this.objectIdKeys.set(domain, key);
+      }
+      digest = await crypto.subtle.sign("HMAC", await key, canonical);
+    }
+    return [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  }
+  private textPath(deviceId: string, objectId?: string): string {
+    const base = `${this.devicePath(deviceId)}objects/text/`;
+    if (objectId === undefined) return base;
+    if (!TEXT_ID.test(objectId)) fail("invalid-data", "正文对象标识无效。");
+    return `${base}${objectId}.json`;
+  }
+  async inspectTextObjects(
+    deviceId: string,
+  ): Promise<{ count: number; limit: 1000 }> {
+    const path = this.textPath(deviceId);
+    let entries: URL[];
+    try {
+      entries = await this.directory(path);
+    } catch (error) {
+      if (error instanceof WebDAVError && error.code === "not-found")
+        return { count: 0, limit: 1000 };
+      throw error;
+    }
+    const count = entries.filter((entry) =>
+      TEXT_FILE.test(
+        decodeURIComponent(entry.pathname.slice(new URL(path).pathname.length)),
+      ),
+    ).length;
+    return { count, limit: 1000 };
+  }
+  private async encodeText(
+    deviceId: string,
+    objectId: string,
+    text: string,
+  ): Promise<string> {
+    const canonical = JSON.stringify(textObject(text));
+    if (!this.settings.encryptionPassphrase) return canonical;
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await keyFor(this.settings.encryptionPassphrase, salt);
+    const encrypted = await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv,
+        additionalData: encoder.encode(
+          `TabRelay-Text-v1:${deviceId}:${objectId}`,
+        ),
+      },
+      key,
+      encoder.encode(canonical),
+    );
+    return JSON.stringify({
+      format: "tabrelay-text-encrypted-v1",
+      algorithm: "AES-256-GCM",
+      kdf: "PBKDF2-SHA256",
+      iterations: 210000,
+      salt: bytesToBase64(salt),
+      iv: bytesToBase64(iv),
+      ciphertext: bytesToBase64(new Uint8Array(encrypted)),
+    });
+  }
+  private async decodeText(
+    body: string,
+    deviceId: string,
+    objectId: string,
+  ): Promise<string> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return fail("invalid-data", "正文对象不是有效 JSON。");
+    }
+    if (parsed && typeof parsed === "object" && "format" in parsed) {
+      const envelope = parsed as Record<string, unknown>;
+      if (
+        envelope.format !== "tabrelay-text-encrypted-v1" ||
+        envelope.algorithm !== "AES-256-GCM" ||
+        envelope.kdf !== "PBKDF2-SHA256" ||
+        envelope.iterations !== 210000
+      )
+        fail("invalid-data", "正文加密格式无效。");
+      if (!this.settings.encryptionPassphrase)
+        fail("encryption", "正文已加密，请使用相同加密口令。");
+      const salt = base64ToBytes(envelope.salt, 16),
+        iv = base64ToBytes(envelope.iv, 12),
+        ciphertext = base64ToBytes(envelope.ciphertext, TEXT_ENVELOPE_BYTES);
+      if (salt.length !== 16 || iv.length !== 12)
+        fail("invalid-data", "正文加密参数无效。");
+      try {
+        const key = await keyFor(this.settings.encryptionPassphrase, salt);
+        const plain = await crypto.subtle.decrypt(
+          {
+            name: "AES-GCM",
+            iv: iv as BufferSource,
+            additionalData: encoder.encode(
+              `TabRelay-Text-v1:${deviceId}:${objectId}`,
+            ),
+          },
+          key,
+          ciphertext as BufferSource,
+        );
+        parsed = JSON.parse(decoder.decode(plain));
+      } catch {
+        return fail("encryption", "正文解密失败：口令错误或对象已损坏。");
+      }
+    } else if (this.settings.encryptionPassphrase) {
+      fail("encryption", "加密配置下拒绝读取明文正文对象。");
+    }
+    if (!parsed || typeof parsed !== "object")
+      fail("invalid-data", "正文对象结构无效。");
+    const data = parsed as TextObject;
+    if (
+      data.schemaVersion !== 1 ||
+      data.extractionVersion !== 1 ||
+      typeof data.text !== "string" ||
+      Object.keys(data).sort().join(",") !==
+        "extractionVersion,schemaVersion,text"
+    )
+      fail("invalid-data", "正文对象协议或字段无效。");
+    textObject(data.text);
+    if ((await this.textObjectId(deviceId, data.text)) !== objectId)
+      fail("integrity", "正文对象标识校验失败，已拒绝读取。");
+    return data.text;
+  }
+  async readText(ref: TextRef): Promise<string> {
+    validateTextRef(ref);
+    const response = await this.request(
+      this.textPath(ref.ownerDeviceId, ref.objectId),
+      "GET",
+      { maxBytes: TEXT_ENVELOPE_BYTES },
+    );
+    const text = await this.decodeText(
+      response.text,
+      ref.ownerDeviceId,
+      ref.objectId,
+    );
+    if (encoder.encode(text).length !== ref.bytes)
+      fail("integrity", "正文引用大小与对象不匹配。");
+    return text;
+  }
+  async writeText(
+    deviceId: string,
+    text: string,
+  ): Promise<{ objectId: string; bytes: number; objectCount: number }> {
+    const work = this.textWriteQueue.then(async () => {
+      id(deviceId);
+      textObject(text);
+      const objectId = await this.textObjectId(deviceId, text),
+        path = this.textPath(deviceId, objectId);
+      await this.ensureDirectories(deviceId);
+      for (const directory of [
+        `${this.devicePath(deviceId)}objects/`,
+        this.textPath(deviceId),
+      ])
+        await this.request(directory, "MKCOL", { allowed: [201, 204, 405] });
+      const existing = await this.request(path, "GET", {
+        allowed: [200, 404],
+        maxBytes: TEXT_ENVELOPE_BYTES,
+      });
+      const info = await this.inspectTextObjects(deviceId);
+      if (existing.status === 200) {
+        if ((await this.decodeText(existing.text, deviceId, objectId)) !== text)
+          fail("integrity", "正文对象内容不匹配。");
+        return {
+          objectId,
+          bytes: encoder.encode(text).length,
+          objectCount: info.count,
+        };
+      }
+      if (info.count >= TEXT_OBJECT_LIMIT)
+        fail(
+          "text-limit",
+          "此设备已达到 1000 个唯一正文对象上限；不会自动删除历史引用对象。",
+        );
+      const body = await this.encodeText(deviceId, objectId, text);
+      await this.verifiedPut(path, body, { "If-None-Match": "*" });
+      const verified = await this.request(path, "GET", {
+        maxBytes: TEXT_ENVELOPE_BYTES,
+      });
+      if ((await this.decodeText(verified.text, deviceId, objectId)) !== text)
+        fail("integrity", "正文对象上传校验失败。");
+      return {
+        objectId,
+        bytes: encoder.encode(text).length,
+        objectCount: info.count + 1,
+      };
+    });
+    this.textWriteQueue = work.catch(() => {});
+    return work;
   }
   private async encode(snapshot: Snapshot): Promise<string> {
     const text = JSON.stringify(snapshot);
@@ -523,8 +872,9 @@ export class WebDAVRepository {
       fail("invalid-data", "远端快照结构无效。");
     const data = parsed as Snapshot;
     if (
-      data.schemaVersion !== 1 ||
+      ![1, 2].includes(data.schemaVersion) ||
       data.deviceId !== deviceId ||
+      typeof data.snapshotId !== "string" ||
       !SAFE_ID.test(data.snapshotId) ||
       !Number.isSafeInteger(data.revision) ||
       data.revision < 1 ||
@@ -533,8 +883,13 @@ export class WebDAVRepository {
       data.windows.length > 100
     )
       fail("invalid-data", "远端快照版本、身份或结构无效。");
-    // Detailed window/tab/group/URL validation belongs to RestorePlanner, before any browser side effect.
-    return data;
+    if (
+      data.schemaVersion === 2 &&
+      !validHumanSnapshotId(data.snapshotId, data.revision)
+    )
+      fail("invalid-data", "v2 快照名称与版本不匹配。");
+    // A broken body reference must not remove otherwise valid metadata from search/restore.
+    return validateSnapshot(data);
   }
   async readSnapshot(
     deviceId: string,
@@ -596,6 +951,12 @@ export class WebDAVRepository {
     id(snapshot.deviceId);
     id(snapshot.snapshotId);
     if (
+      snapshot.schemaVersion === 2 &&
+      !validHumanSnapshotId(snapshot.snapshotId, snapshot.revision)
+    )
+      fail("invalid-data", "v2 快照名称与版本不匹配。");
+    validateContentRefs(snapshot);
+    if (
       snapshot.deviceId !== device.deviceId ||
       !Number.isSafeInteger(snapshot.revision) ||
       snapshot.revision < 1 ||
@@ -626,7 +987,10 @@ export class WebDAVRepository {
     if (!same && remote && snapshot.revision <= remote.snapshot.revision)
       fail("conflict", "待发布版本未递增，已暂停同步。");
     const encoded = await this.encode(snapshot);
-    const historyName = `${String(snapshot.revision).padStart(12, "0")}-${snapshot.snapshotId}.json`;
+    const historyName =
+      snapshot.schemaVersion === 2
+        ? `${snapshot.snapshotId}.json`
+        : `${String(snapshot.revision).padStart(12, "0")}-${snapshot.snapshotId}.json`;
     const historyPath = `${base}history/${historyName}`;
     // Immutable staging doubles as history. Never unsafe MOVE over current.json:
     // If-Match on a MOVE source does not protect the destination against a writer.

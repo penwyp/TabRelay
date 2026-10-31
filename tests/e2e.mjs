@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
 import os from "node:os";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 execFileSync(process.execPath, ["scripts/build.mjs", "--test"], {
   stdio: "inherit",
@@ -15,6 +16,8 @@ const contexts = [];
 const results = [];
 await fs.mkdir("evidence/screenshots", { recursive: true });
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+const fixtureSnapshotId = (revision, time = "20261031-160000") =>
+  `${time}Z-r${String(revision).padStart(12, "0")}`;
 async function eventually(fn, timeout = 30000) {
   const start = Date.now();
   let last;
@@ -297,6 +300,67 @@ try {
   const a = await browser("A");
   let b = await browser("B");
   let optionsPage;
+  await test("Manifest action popup opens the default search experience at popup dimensions", async () => {
+    const manifest = await a.worker.evaluate(() =>
+      chrome.runtime.getManifest(),
+    );
+    assert.equal(manifest.action.default_popup, "popup.html");
+    const cdp = await a.context.newCDPSession(a.page);
+    const actual = await a.worker.evaluate(async () => {
+      try {
+        await chrome.action.openPopup();
+        return { opened: true };
+      } catch (error) {
+        return { opened: false, reason: String(error) };
+      }
+    });
+    let target;
+    if (actual.opened) {
+      target = await eventually(
+        async () =>
+          (await cdp.send("Target.getTargets")).targetInfos.find(
+            (info) => info.url === `chrome-extension://${a.id}/popup.html`,
+          ),
+        5000,
+      );
+      assert.ok(
+        target,
+        "Successful action.openPopup must produce a real popup target",
+      );
+    }
+    await fs.writeFile(
+      "evidence/action-popup-target.json",
+      JSON.stringify(
+        {
+          ...actual,
+          target: target && { type: target.type, url: target.url },
+          fallback: actual.opened
+            ? undefined
+            : "Action popup unavailable in this Chromium environment; same document verified at popup viewport, not claimed as actual action target",
+        },
+        null,
+        2,
+      ),
+    );
+    if (target)
+      await cdp.send("Target.closeTarget", { targetId: target.targetId });
+    await cdp.detach();
+    const popup = await a.context.newPage();
+    await popup.setViewportSize({ width: 600, height: 600 });
+    await popup.goto(`chrome-extension://${a.id}/popup.html`);
+    await popup.locator("#search-query").waitFor();
+    assert.equal(
+      await popup.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+      true,
+      "Popup must not require horizontal scrolling",
+    );
+    await popup.screenshot({
+      path: "evidence/screenshots/09-popup-default-search.png",
+    });
+    await popup.close();
+  });
   await test("Settings opens in a dedicated tab and extension icons decode", async () => {
     const opened = a.context.waitForEvent("page");
     await a.page.locator("#settings-open").click();
@@ -454,7 +518,10 @@ try {
   await test("Group-only selection restores one window with only group members", async () => {
     const c = await browser("C-group-only");
     const selected = structuredClone(source);
-    selected.snapshotId = "group-only-expanded-fixture";
+    selected.snapshotId = fixtureSnapshotId(
+      selected.revision,
+      "20261031-160100",
+    );
     const sourceWindow = selected.windows.find((w) => w.groups.length);
     const selectedGroup = sourceWindow.groups[0];
     // An all-group window has no ungrouped active tab. Use the expanded variant
@@ -680,7 +747,7 @@ try {
   });
   await test("Cancel stops future creations and retains originals plus partial additions", async () => {
     const snap = structuredClone(source);
-    snap.snapshotId = "cancel-test";
+    snap.snapshotId = fixtureSnapshotId(snap.revision, "20261031-160200");
     snap.windows = [
       {
         windowKey: "cancel-window",
@@ -713,7 +780,7 @@ try {
   await synced(b);
   await test("Concurrent user tab changes are reflected in the merged snapshot", async () => {
     const snap = structuredClone(source);
-    snap.snapshotId = "user-change-test";
+    snap.snapshotId = fixtureSnapshotId(snap.revision, "20261031-160300");
     snap.windows = [
       {
         windowKey: "user-change-window",
@@ -762,7 +829,7 @@ try {
   let interruptedSession;
   await test("Real MV3 worker termination preserves journal and does not replay uncertain work", async () => {
     const snap = structuredClone(source);
-    snap.snapshotId = "worker-restart-test";
+    snap.snapshotId = fixtureSnapshotId(snap.revision, "20261031-160400");
     snap.windows = [
       {
         windowKey: "worker-restart-window",
@@ -857,14 +924,17 @@ try {
     const key = `/dav/tabrelay/v1/devices/${sa.deviceId}/current.json`;
     const modified = current(sa.deviceId);
     modified.revision += 100;
-    modified.snapshotId = "other-writer";
+    modified.snapshotId = fixtureSnapshotId(
+      modified.revision,
+      "20261031-160500",
+    );
     dav.files.set(key, JSON.stringify(modified));
     await a.call({ type: "SYNC_NOW" });
     await eventually(async () => {
       const s = await a.call({ type: "GET_STATE" });
       return s.sync.pausedConflict;
     });
-    assert.equal(current(sa.deviceId).snapshotId, "other-writer");
+    assert.equal(current(sa.deviceId).snapshotId, modified.snapshotId);
   });
   const searchFixture = seedSearchFixture();
   const d = await browser("D-search");
@@ -887,33 +957,20 @@ try {
         : false;
     });
   let historicalHit;
-  await test("Search opens in full tab and distinguishes unrequested history from loaded data", async () => {
-    const opened = d.context.waitForEvent("page");
-    await d.page.locator("#search-open").click();
-    searchPage = await opened;
-    await searchPage.waitForURL(`chrome-extension://${d.id}/search.html`);
-    await searchPage.locator("#load-snapshots").waitFor();
-    const initial = await d.call({ type: "SEARCH_STATUS" });
-    assert.equal(initial.sources.length, 0);
-    assert.equal(initial.updatedAt, undefined);
-    await searchPage.locator("#load-snapshots").click();
-    const loaded = await waitSearch(initial.generation);
+  await test("Popup automatically indexes all retained snapshots without a history toggle", async () => {
+    searchPage = await d.context.newPage();
+    await searchPage.setViewportSize({ width: 600, height: 600 });
+    await searchPage.goto(`chrome-extension://${d.id}/popup.html`);
+    await searchPage.locator("#search-query").waitFor();
+    assert.equal(await searchPage.locator("#include-history").count(), 0);
+    const complete = await waitSearch();
     assert.ok(
-      loaded.sources.some(
+      complete.sources.some(
         (source) => source.kind === "current" && source.status === "loaded",
       ),
-      "Expected loaded current source: " + JSON.stringify(loaded),
+      "Expected automatically loaded current source: " +
+        JSON.stringify(complete),
     );
-    assert.ok(
-      loaded.sources.some(
-        (source) => source.kind === "history" && source.status === "not-loaded",
-      ),
-      "Expected explicitly unrequested history: " + JSON.stringify(loaded),
-    );
-    assert.equal((await querySearch("资源成本治理")).total, 0);
-    await searchPage.locator("#include-history").check();
-    await searchPage.locator("#load-snapshots").click();
-    const complete = await waitSearch(loaded.generation);
     assert.ok(
       complete.sources.some(
         (source) =>
@@ -977,12 +1034,18 @@ try {
       deviceId: searchFixture.deviceId,
       kind: "current",
     });
-    assert.equal(duplicate.total, 2);
+    assert.equal(
+      duplicate.total,
+      1,
+      "Same URL should aggregate into one result: " + JSON.stringify(duplicate),
+    );
+    assert.equal(duplicate.occurrenceTotal, 2);
+    const occurrences = duplicate.results[0].occurrences;
     assert.deepEqual(
-      new Set(duplicate.results.map((result) => result.tabKey)),
+      new Set(occurrences.map((result) => result.tabKey)),
       new Set(["search-duplicate-a", "search-duplicate-b"]),
     );
-    assert.equal(new Set(duplicate.results.map((result) => result.id)).size, 2);
+    assert.equal(new Set(occurrences.map((result) => result.id)).size, 2);
     const filtered = await querySearch(
       "",
       { deviceId: searchFixture.deviceId, kind: "history", group: "资源治理" },
@@ -1013,6 +1076,45 @@ try {
       path: "evidence/screenshots/07-search-history-results.png",
       fullPage: true,
     });
+  });
+  await test("Aggregated result source dropdown plans the selected exact occurrence", async () => {
+    await searchPage.locator("#search-query").fill("same-url");
+    await searchPage.locator("#search-submit").click();
+    const card = searchPage.locator(".search-result").first();
+    const selector = card.locator("select[data-action='select-source']");
+    await selector.waitFor();
+    const choices = await selector
+      .locator("option")
+      .evaluateAll((nodes) =>
+        nodes.map((node) => ({ value: node.value, text: node.textContent })),
+      );
+    assert.ok(
+      choices.length >= 2,
+      "Distinct same-URL provenance must remain selectable: " +
+        JSON.stringify(choices),
+    );
+    const response = await querySearch("same-url", {
+      deviceId: searchFixture.deviceId,
+      kind: "current",
+    });
+    const leaf = response.results[0].occurrences.find(
+      (item) => item.tabKey === "search-duplicate-b",
+    );
+    assert.ok(leaf);
+    await selector.selectOption(leaf.id);
+    await card.locator("[data-action='restore-tab']").click();
+    await searchPage.locator("#search-restore-dialog[open]").waitFor();
+    const plan = await d.page.evaluate(
+      async () => (await chrome.storage.local.get("restorePlan")).restorePlan,
+    );
+    assert.equal(plan.windows[0].tabs[0].tabKey, "search-duplicate-b");
+    assert.equal(plan.windows[0].tabs[0].origin.deviceId, "origin-second");
+    await searchPage.keyboard.press("Escape");
+    await searchPage.locator("#search-query").fill("资源治理");
+    await searchPage.locator("#search-submit").click();
+    await searchPage
+      .locator('.search-result[data-tab-key="search-budget"]')
+      .waitFor();
   });
   await test("Historical search tab group and window plans require confirmation and preserve existing windows", async () => {
     const before = await d.page.evaluate(() =>
@@ -1146,6 +1248,39 @@ try {
       d.call({ type: "SEARCH_LOCATE", resultId: local.results[0].id }),
     );
   });
+  await test("Clearing local search pauses automatic reload across popup reopen until rebuild", async () => {
+    await searchPage.locator("#clear-cache").click();
+    await eventually(
+      async () =>
+        (await d.call({ type: "SEARCH_STATUS" })).sources.length === 0,
+    );
+    await searchPage.close();
+    const requestCount = dav.requests.length;
+    searchPage = await d.context.newPage();
+    await searchPage.setViewportSize({ width: 600, height: 600 });
+    await searchPage.goto(`chrome-extension://${d.id}/popup.html`);
+    await searchPage.locator("#search-query").waitFor();
+    await delay(500);
+    assert.equal((await d.call({ type: "SEARCH_STATUS" })).sources.length, 0);
+    assert.equal(
+      dav.requests.length,
+      requestCount,
+      "Paused popup must not implicitly refill from WebDAV",
+    );
+    await searchPage.locator("#rebuild-cache").click();
+    await waitSearch();
+    assert.ok((await querySearch("资源成本治理")).total >= 1);
+    const beforeClose = await d.call({ type: "SEARCH_STATUS" });
+    await searchPage.close();
+    searchPage = await d.context.newPage();
+    await searchPage.setViewportSize({ width: 600, height: 600 });
+    await searchPage.goto(`chrome-extension://${d.id}/popup.html`);
+    await searchPage.locator("#search-query").waitFor();
+    assert.ok(
+      (await d.call({ type: "SEARCH_STATUS" })).sources.length >=
+        beforeClose.sources.length,
+    );
+  });
   await test("Search exposes failed sources and cancellation prevents late writes", async () => {
     const currentKey = searchFixture.devicePath + "current.json";
     const saved = dav.files.get(currentKey);
@@ -1157,9 +1292,12 @@ try {
         (source) =>
           source.deviceId === searchFixture.deviceId &&
           source.kind === "current" &&
-          source.status === "failed",
+          source.status === "loaded" &&
+          source.stale === true &&
+          Boolean(source.error),
       ),
-      "Expected missing current source failure: " + JSON.stringify(failed),
+      "Expected retained current cache with explicit stale/failure diagnostic: " +
+        JSON.stringify(failed),
     );
     assert.ok(
       failed.sources.some(
@@ -1205,6 +1343,414 @@ try {
         tabKey: historicalHit.tabKey,
       }),
     );
+  });
+  await test("Opt-in body capture excludes private DOM fields and supports Chinese snippet search", async () => {
+    const e = await browser("E-body");
+    const bodyPage = await e.context.newPage();
+    await bodyPage.goto(dav.origin + "/fixture/body-privacy");
+    const bodyState = await configured(e, "正文验证设备");
+    const findBody = () =>
+      current(bodyState.deviceId)
+        .windows.flatMap((w) => w.tabs)
+        .find((tab) => tab.url.endsWith("/fixture/body-privacy"));
+    assert.equal(findBody().content?.status, "disabled");
+    assert.equal(findBody().content?.ref, undefined);
+    const options = await e.context.newPage();
+    await options.goto(`chrome-extension://${e.id}/options.html`);
+    await options.locator("#settings-fields:not([disabled])").waitFor();
+    await options.locator("#content-enabled").waitFor();
+    assert.equal(await options.locator("#content-enabled").isChecked(), false);
+    assert.deepEqual(
+      await options
+        .locator("#sync-interval option")
+        .evaluateAll((nodes) => nodes.map((node) => node.value)),
+      ["5", "10", "30", "60", "1440"],
+    );
+    await options.locator("#content-origins").fill(dav.origin);
+    await options.locator("#content-enabled").check();
+    await options.locator("#save-settings").click();
+    await eventually(
+      async () => (await e.call({ type: "GET_STATE" })).settings.contentEnabled,
+    );
+    await synced(e);
+    const captured = findBody();
+    assert.equal(current(bodyState.deviceId).schemaVersion, 2);
+    assert.equal(
+      captured.content.status,
+      "available",
+      JSON.stringify(captured),
+    );
+    assert.equal(captured.content.ref.captureUrl, captured.url);
+    const objectPath = `/dav/tabrelay/v1/devices/${bodyState.deviceId}/objects/text/${captured.content.ref.objectId}.json`;
+    const object = dav.files.get(objectPath);
+    assert.ok(
+      object,
+      "Immutable body ref object must exist before snapshot publication",
+    );
+    assert.ok(object.includes("量子陀螺导航"));
+    assert.ok(object.includes("sapphire-resonator-protocol"));
+    assert.equal(
+      /SECRET_[A-Z]+_739/.test(object),
+      false,
+      "Private/hidden/form/script text must not enter stored body object",
+    );
+    const popup = await e.context.newPage();
+    await popup.setViewportSize({ width: 600, height: 600 });
+    await popup.goto(`chrome-extension://${e.id}/popup.html`);
+    await eventually(async () => {
+      const status = await e.call({ type: "SEARCH_STATUS" });
+      return status.updatedAt && !status.loading;
+    });
+    const bodyResults = await e.call({
+      type: "SEARCH_QUERY",
+      query: "量子陀螺导航",
+      filters: { deviceId: bodyState.deviceId },
+      limit: 20,
+    });
+    assert.ok(bodyResults.total >= 1, JSON.stringify(bodyResults));
+    assert.ok(
+      bodyResults.results.some((result) =>
+        result.bodySnippet?.includes("量子陀螺导航"),
+      ),
+      JSON.stringify(bodyResults),
+    );
+    assert.equal(
+      (
+        await e.call({
+          type: "SEARCH_QUERY",
+          query: "SECRET_INPUT_739",
+          limit: 100,
+        })
+      ).total,
+      0,
+    );
+    await popup.locator("#search-query").fill("量子陀螺导航");
+    await popup.locator("#search-submit").click();
+    await popup.locator(".search-result").first().waitFor();
+    await popup.screenshot({
+      path: "evidence/screenshots/10-body-chinese-search.png",
+      fullPage: true,
+    });
+    // Repeated unchanged content is content-addressed, not a new raw body per snapshot.
+    const beforeObjects = [...dav.files.keys()].filter((key) =>
+      key.includes(`/devices/${bodyState.deviceId}/objects/text/`),
+    );
+    await synced(e);
+    assert.deepEqual(
+      [...dav.files.keys()].filter((key) =>
+        key.includes(`/devices/${bodyState.deviceId}/objects/text/`),
+      ),
+      beforeObjects,
+    );
+    const names = [...dav.files.keys()]
+      .filter((key) => key.includes(`/devices/${bodyState.deviceId}/history/`))
+      .map((key) => key.split("/").pop());
+    assert.ok(
+      names.some((name) => /20[0-9]{2}[-_]?[0-9]{2}[-_]?[0-9]{2}/.test(name)),
+      "New history identifiers must expose a human-readable date: " +
+        JSON.stringify(names),
+    );
+  });
+  await test("Encrypted IndexedDB search retains a genuine six-megabyte Chinese body corpus without duplicate copies", async () => {
+    const deviceId = "large-corpus-device",
+      rootPath = "/dav/large-corpus/tabrelay/v1/";
+    const devicePath = rootPath + `devices/${deviceId}/`;
+    for (const dir of [
+      "/dav/large-corpus/",
+      rootPath,
+      rootPath + "devices/",
+      devicePath,
+      devicePath + "history/",
+      devicePath + "objects/",
+      devicePath + "objects/text/",
+    ])
+      dav.dirs.add(dir);
+    const lateMarker = "第九十九页独特标记蓝宝石导航";
+    const tabs = [];
+    let corpusBytes = 0;
+    for (let index = 0; index < 100; index++) {
+      const text = (
+        "中".repeat(19920) +
+        `容量语料第${index}页` +
+        (index === 99 ? lateMarker : "")
+      ).padEnd(20000, "文");
+      const canonical = JSON.stringify({
+        schemaVersion: 1,
+        extractionVersion: 1,
+        text,
+      });
+      const objectId = crypto
+        .createHash("sha256")
+        .update(canonical)
+        .digest("hex");
+      const bytes = Buffer.byteLength(text, "utf8");
+      corpusBytes += bytes;
+      dav.files.set(devicePath + `objects/text/${objectId}.json`, canonical);
+      const url = dav.origin + "/fixture/large-corpus-" + index;
+      tabs.push({
+        tabKey: "large-tab-" + index,
+        url,
+        title: "容量测试页面 " + index,
+        index,
+        pinned: false,
+        origin: { deviceId, tabKey: "large-tab-" + index },
+        content: {
+          status: "available",
+          ref: {
+            ownerDeviceId: deviceId,
+            objectId,
+            bytes,
+            observedAt: "2026-10-31T16:00:00Z",
+            captureUrl: url,
+          },
+        },
+      });
+    }
+    assert.ok(corpusBytes > 3 * 1024 * 1024);
+    const snapshot = (revision) => ({
+      schemaVersion: 2,
+      deviceId,
+      revision,
+      snapshotId: fixtureSnapshotId(revision),
+      capturedAt: "2026-10-31T16:00:00Z",
+      windows: [{ windowKey: "large-window", order: 0, groups: [], tabs }],
+    });
+    dav.files.set(devicePath + "current.json", JSON.stringify(snapshot(2)));
+    dav.files.set(devicePath + "recovery.json", JSON.stringify(snapshot(1)));
+    dav.files.set(
+      devicePath + `history/${fixtureSnapshotId(1)}.json`,
+      JSON.stringify(snapshot(1)),
+    );
+    dav.files.set(
+      devicePath + "device.json",
+      JSON.stringify({
+        deviceId,
+        name: "大正文语料验证",
+        version: "2.0.0",
+        updatedAt: "2026-10-31T16:00:00Z",
+        windows: 1,
+        tabs: 100,
+      }),
+    );
+    let f = await browser("F-large-corpus");
+    await configured(f, "容量验证设备", dav.origin + "/dav/large-corpus/");
+    const beforeReads = dav.requests.filter(
+      (r) =>
+        r.path.includes(`/devices/${deviceId}/objects/text/`) &&
+        r.method === "GET",
+    ).length;
+    await f.call({ type: "SEARCH_LOAD" });
+    const status = await eventually(async () => {
+      const state = await f.call({ type: "SEARCH_STATUS" });
+      return !state.loading && state.updatedAt ? state : false;
+    }, 120000);
+    assert.equal(status.bodyLoaded, 100, JSON.stringify(status));
+    assert.equal(status.bodyMissing, 0, JSON.stringify(status));
+    assert.equal(status.bodyTruncated, 0, JSON.stringify(status));
+    assert.equal(status.truncated, false, JSON.stringify(status));
+    const objectReads =
+      dav.requests.filter(
+        (r) =>
+          r.path.includes(`/devices/${deviceId}/objects/text/`) &&
+          r.method === "GET",
+      ).length - beforeReads;
+    assert.equal(
+      objectReads,
+      100,
+      "Repeated references across three snapshots must load each immutable body only once",
+    );
+    const late = await f.call({
+      type: "SEARCH_QUERY",
+      query: lateMarker,
+      filters: { deviceId },
+      limit: 10,
+    });
+    assert.equal(late.total, 1, JSON.stringify(late));
+    assert.equal(late.occurrenceTotal, 3);
+    assert.ok(late.results[0].bodySnippet.includes(lateMarker));
+    const inspectDatabase = (page) =>
+      page.evaluate(async () => {
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open("tabrelay-search-v2", 1);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        try {
+          const records = await new Promise((resolve, reject) => {
+            const request = db
+              .transaction("records", "readonly")
+              .objectStore("records")
+              .getAll();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          return {
+            records: records.length,
+            bodyRecords: records.filter((record) => record.kind === "body")
+              .length,
+            ciphertextBytes: records.reduce(
+              (sum, record) => sum + record.ciphertext.byteLength,
+              0,
+            ),
+            encryptedOnly: records.every(
+              (record) =>
+                record.ciphertext instanceof ArrayBuffer &&
+                record.ciphertext.byteLength >= 16 &&
+                record.iv instanceof ArrayBuffer &&
+                record.iv.byteLength === 12 &&
+                Object.keys(record).sort().join(",") ===
+                  "ciphertext,id,iv,kind",
+            ),
+          };
+        } finally {
+          db.close();
+        }
+      });
+    const encryptedDatabase = await inspectDatabase(f.page);
+    assert.equal(
+      encryptedDatabase.bodyRecords,
+      100,
+      "IDB must persist exactly one encrypted record per unique body",
+    );
+    assert.equal(encryptedDatabase.encryptedOnly, true);
+    assert.ok(encryptedDatabase.ciphertextBytes > 3 * 1024 * 1024);
+    const session = await f.page.evaluate(() =>
+      chrome.storage.session.get(null),
+    );
+    const sessionJson = JSON.stringify(session);
+    assert.equal(
+      sessionJson.includes(lateMarker),
+      false,
+      "Session storage must not retain plaintext body cache",
+    );
+    assert.ok(
+      Buffer.byteLength(sessionJson) < 1024 * 1024,
+      "Bulk corpus belongs in encrypted IndexedDB, not Chrome session quota",
+    );
+    await fs.writeFile(
+      "evidence/large-corpus.json",
+      JSON.stringify(
+        {
+          objects: 100,
+          encryptedDatabase,
+          utf8BodyBytes: corpusBytes,
+          bodyLoaded: status.bodyLoaded,
+          bodyMissing: status.bodyMissing,
+          bodyTruncated: status.bodyTruncated,
+          cacheTruncated: status.truncated,
+          objectGets: objectReads,
+          retainedOccurrences: late.occurrenceTotal,
+          lateMarkerHit: true,
+          sessionStorageBytes: Buffer.byteLength(sessionJson),
+          browser:
+            "Actual Chromium extension search pipeline; loopback synthetic fixtures only",
+        },
+        null,
+        2,
+      ),
+    );
+    const requestsBeforeRestart = dav.requests.length;
+    await f.context.close();
+    f = await browser("F-large-corpus");
+    const afterRestart = await f.call({ type: "SEARCH_STATUS" });
+    assert.equal(
+      afterRestart.sources.length,
+      0,
+      "Browser-session key loss must discard old encrypted local search cache",
+    );
+    assert.equal(
+      (await f.call({ type: "SEARCH_QUERY", query: lateMarker })).total,
+      0,
+    );
+    assert.equal(
+      (await inspectDatabase(f.page)).records,
+      0,
+      "Unreadable old-key ciphertext must be purged on browser restart",
+    );
+    assert.equal(
+      dav.requests.length,
+      requestsBeforeRestart,
+      "Cache restart inspection must not silently fetch the corpus",
+    );
+  });
+  await test("Closing popup during restore preserves the background journal and reopened progress", async () => {
+    const g = await browser("G-popup-restore");
+    const originalPage = await g.context.newPage();
+    await originalPage.goto(dav.origin + "/fixture/popup-original");
+    const originalTabs = await g.page.evaluate(() => chrome.tabs.query({}));
+    const fixture = {
+      schemaVersion: 2,
+      deviceId: "popup-source",
+      revision: 1,
+      snapshotId: fixtureSnapshotId(1),
+      capturedAt: "2026-10-31T16:00:00Z",
+      windows: [
+        {
+          windowKey: "popup-source-window",
+          order: 0,
+          groups: [],
+          tabs: Array.from({ length: 10 }, (_, index) => ({
+            tabKey: "popup-restore-" + index,
+            url: dav.origin + "/fixture/popup-restore-" + index,
+            title: "Popup restore " + index,
+            index,
+            pinned: false,
+            origin: {
+              deviceId: "popup-source",
+              tabKey: "popup-restore-" + index,
+            },
+          })),
+        },
+      ],
+    };
+    let popup = await g.context.newPage();
+    await popup.setViewportSize({ width: 600, height: 600 });
+    await popup.goto(`chrome-extension://${g.id}/popup.html`);
+    await popup.locator("#search-query").waitFor();
+    const plan = await g.call({ type: "PLAN_RESTORE", snapshot: fixture });
+    const response = await popup.evaluate(
+      (message) => chrome.runtime.sendMessage(message),
+      { type: "START_RESTORE", planId: plan.id },
+    );
+    assert.equal(response.ok, true, JSON.stringify(response));
+    const running = await eventually(async () => {
+      const state = await g.call({ type: "GET_STATE" });
+      return state.operation?.status === "RUNNING" &&
+        state.operation.createdTabs.length > 0
+        ? state
+        : false;
+    });
+    assert.ok(
+      running.operation.createdTabs.length < 10,
+      "Popup must close while work actually remains",
+    );
+    await popup.close();
+    const completed = await eventually(async () => {
+      const state = await g.call({ type: "GET_STATE" });
+      return state.operation?.status === "COMPLETED" ? state : false;
+    });
+    assert.equal(completed.operation.id, running.operation.id);
+    assert.equal(completed.operation.createdTabs.length, 10);
+    assert.deepEqual(completed.operation.failures, []);
+    popup = await g.context.newPage();
+    await popup.setViewportSize({ width: 600, height: 600 });
+    await popup.goto(`chrome-extension://${g.id}/popup.html`);
+    await eventually(
+      async () =>
+        (await popup.locator("#workbench-operation-title").textContent()) ===
+        "恢复完成",
+    );
+    assert.equal(await popup.locator("#workbench-operation").isVisible(), true);
+    const after = await g.page.evaluate(() => chrome.tabs.query({}));
+    for (const original of originalTabs)
+      assert.equal(
+        after.find((tab) => tab.id === original.id)?.url,
+        original.url,
+      );
+    await popup.screenshot({
+      path: "evidence/screenshots/11-popup-restored-journal.png",
+      fullPage: true,
+    });
   });
   console.log(`All ${results.length} real-browser E2E scenarios passed.`);
 } catch (error) {

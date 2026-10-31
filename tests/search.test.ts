@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Settings, Snapshot } from "../src/types";
 const mocks = vi.hoisted(() => ({
@@ -5,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   listDevices: vi.fn(),
   readSnapshot: vi.fn(),
   listHistory: vi.fn(),
+  readText: vi.fn(),
 }));
 vi.mock("../src/state", () => ({
   load: async () => structuredClone(mocks.state),
@@ -22,6 +24,7 @@ vi.mock("../src/webdav", () => ({
     listDevices = mocks.listDevices;
     readSnapshot = mocks.readSnapshot;
     listHistory = mocks.listHistory;
+    readText = mocks.readText;
   },
 }));
 import {
@@ -33,6 +36,8 @@ import {
   getSearchSource,
   getSearchResult,
   SEARCH_LIMITS,
+  autoSearch,
+  rebuildSearch,
 } from "../src/search";
 const settings: Settings = {
   endpoint: "https://dav.example/",
@@ -46,6 +51,7 @@ const settings: Settings = {
   encryptionPassphrase: "private-passphrase",
 };
 let session: Record<string, any>;
+let local: Record<string, any>;
 function snapshot(
   deviceId = "device-A",
   title = "中文研究",
@@ -111,9 +117,18 @@ async function settled() {
 }
 beforeEach(async () => {
   session = {};
+  local = {};
   mocks.state = { deviceId: "local", settings: structuredClone(settings) };
   vi.stubGlobal("chrome", {
     storage: {
+      local: {
+        get: vi.fn(async (key: string) => ({
+          [key]: structuredClone(local[key]),
+        })),
+        set: vi.fn(async (value: Record<string, any>) => {
+          Object.assign(local, structuredClone(value));
+        }),
+      },
       session: {
         get: vi.fn(async (key: string) => ({
           [key]: structuredClone(session[key]),
@@ -140,6 +155,9 @@ beforeEach(async () => {
   mocks.listHistory
     .mockReset()
     .mockResolvedValue(["000000000002-snapshot-2.json"]);
+  mocks.readText
+    .mockReset()
+    .mockResolvedValue("只有正文中的独特关键词 bodyneedle");
   await clearSearch();
 });
 describe("search local cache and ranking", () => {
@@ -148,31 +166,36 @@ describe("search local cache and ranking", () => {
     expect(mocks.listDevices).not.toHaveBeenCalled();
     expect(mocks.readSnapshot).not.toHaveBeenCalled();
   });
-  it("current-only loading exposes unknown history coverage without fetching it", async () => {
+  it("all retained sources load automatically even for legacy false flag", async () => {
     await loadSearch(false);
     const coverage = await settled();
-    expect(mocks.listHistory).not.toHaveBeenCalled();
-    expect(coverage.sources.map((s) => s.status)).toEqual([
-      "loaded",
-      "not-loaded",
+    expect(mocks.listHistory).toHaveBeenCalledOnce();
+    expect(coverage.sources.map((source) => source.kind)).toEqual([
+      "current",
+      "recovery",
+      "history",
     ]);
-    expect(coverage.sources[1].errorCode).toBe("history-not-loaded");
-    expect(coverage.completed).toBe(1);
+    expect(coverage.completed).toBe(3);
     expect(coverage.devicesLoaded).toBe(1);
     expect(coverage.sources[0]).not.toHaveProperty("snapshot");
   });
+
   it("retains Chinese matching, distinct same-URL occurrences and source identity", async () => {
     await loadSearch(false);
     await settled();
     const chinese = await querySearch("中文");
     expect(chinese.total).toBe(1);
     const duplicate = await querySearch("example.com");
-    expect(duplicate.total).toBe(2);
-    expect(new Set(duplicate.results.map((r) => r.id)).size).toBe(2);
+    expect(duplicate.total).toBe(3);
+    expect(duplicate.occurrenceTotal).toBe(6);
+    expect(
+      new Set(duplicate.results.flatMap((r) => r.occurrences!.map((o) => o.id)))
+        .size,
+    ).toBe(6);
     expect(duplicate.results.every((r) => r.groupTitle === "数据库研究")).toBe(
       true,
     );
-    const result = await getSearchResult(duplicate.results[0].id);
+    const result = await getSearchResult(chinese.results[0].id);
     const source = await getSearchSource(result.sourceId);
     expect(source.snapshot?.snapshotId).toBe("snapshot-1");
     source.snapshot!.windows[0].tabs[0].title = "Mutated";
@@ -230,8 +253,8 @@ describe("search local cache and ranking", () => {
           { group: "数据库", domain: "example.com", pinned: false },
           1,
         )
-      ).total,
-    ).toBe(4);
+      ).occurrenceTotal,
+    ).toBe(12);
     expect((await querySearch("", { pinned: true })).total).toBe(0);
   });
   it("opt-in historical load includes recovery and retained versions with bounded time filters", async () => {
@@ -269,7 +292,7 @@ describe("search local cache and ranking", () => {
         (s) => s.deviceId === "device-B" && s.kind === "current",
       )?.status,
     ).toBe("failed");
-    expect((await querySearch("example")).total).toBe(2);
+    expect((await querySearch("example")).occurrenceTotal).toBe(6);
   });
   it("refresh replaces pruned history rather than keeping obsolete records", async () => {
     await loadSearch(true);
@@ -362,4 +385,227 @@ describe("search local cache and ranking", () => {
     ).toBe(true);
     expect((await querySearch("中文")).total).toBe(1);
   });
+  it("automatically loads once, then performs no network for fresh repeated input", async () => {
+    await autoSearch();
+    await settled();
+    const reads = mocks.readSnapshot.mock.calls.length;
+    await autoSearch();
+    await querySearch("中文");
+    await autoSearch();
+    expect(mocks.readSnapshot).toHaveBeenCalledTimes(reads);
+  });
+  it("clear pauses persistently until explicit rebuild", async () => {
+    await autoSearch();
+    await settled();
+    await clearSearch(true);
+    const calls = mocks.listDevices.mock.calls.length;
+    session = {};
+    expect((await autoSearch()).paused).toBe(true);
+    expect(mocks.listDevices).toHaveBeenCalledTimes(calls);
+    await rebuildSearch();
+    await settled();
+    expect((await searchStatus()).paused).toBe(false);
+    expect(mocks.listDevices).toHaveBeenCalledTimes(calls + 1);
+  });
+  it("reuses immutable history but re-reads current and recovery incrementally", async () => {
+    await loadSearch();
+    await settled();
+    mocks.readSnapshot.mockClear();
+    await loadSearch();
+    await settled();
+    expect(mocks.readSnapshot.mock.calls.map((call) => call[1])).toEqual([
+      "current",
+      "recovery",
+    ]);
+  });
+  it("keeps known snapshots as explicitly stale when refresh fails", async () => {
+    await loadSearch();
+    await settled();
+    mocks.readSnapshot.mockRejectedValue(Error("offline secret-password"));
+    await loadSearch();
+    const coverage = await settled();
+    const current = coverage.sources.find(
+      (source) => source.kind === "current",
+    )!;
+    expect(current.status).toBe("loaded");
+    expect(current.stale).toBe(true);
+    expect(current.error).toBeTruthy();
+    expect((await querySearch("中文")).occurrenceTotal).toBe(2);
+    expect(JSON.stringify(session)).not.toContain("offline secret-password");
+  });
+  it("matches body-only text, reuses objects and aggregates identical content across owners", async () => {
+    mocks.listDevices.mockResolvedValue([
+      { deviceId: "device-A", name: "A" },
+      { deviceId: "device-B", name: "B" },
+    ]);
+    mocks.listHistory.mockResolvedValue([]);
+    mocks.readSnapshot.mockImplementation(async (deviceId: string) => {
+      const value = snapshot(deviceId);
+      value.schemaVersion = 2;
+      value.snapshotId = "20261021-100000Z-r000001";
+      value.windows[0].tabs = value.windows[0].tabs.slice(0, 1);
+      value.windows[0].tabs[0].content = {
+        status: "available",
+        ref: {
+          ownerDeviceId: deviceId,
+          objectId: (deviceId === "device-A" ? "a" : "b").repeat(64),
+          bytes: 48,
+          observedAt: value.capturedAt,
+          captureUrl: value.windows[0].tabs[0].url,
+        },
+      };
+      return value;
+    });
+    await loadSearch();
+    await settled();
+    const result = await querySearch("bodyneedle");
+    expect(result.total).toBe(1);
+    expect(result.occurrenceTotal).toBe(4);
+    expect(result.results[0].occurrences).toHaveLength(4);
+    expect(result.results[0].bodySnippet).toContain("bodyneedle");
+    expect(mocks.readText).toHaveBeenCalledTimes(2);
+    await loadSearch();
+    await settled();
+    expect(mocks.readText).toHaveBeenCalledTimes(2);
+    expect(
+      (await querySearch("bodyneedle", { deviceId: "device-B" }))
+        .occurrenceTotal,
+    ).toBe(2);
+  });
+  it("does not fetch a body with mismatched capture URL, but still indexes metadata", async () => {
+    mocks.readSnapshot.mockImplementation(async () => {
+      const value = snapshot();
+      value.schemaVersion = 2;
+      value.snapshotId = "20261021-100000Z-r000001";
+      value.windows[0].tabs[0].content = {
+        status: "available",
+        ref: {
+          ownerDeviceId: "device-A",
+          objectId: "a".repeat(64),
+          bytes: 10,
+          observedAt: value.capturedAt,
+          captureUrl: "https://another.example/",
+        },
+      };
+      return value;
+    });
+    await loadSearch();
+    await settled();
+    expect(mocks.readText).not.toHaveBeenCalled();
+    const result = await querySearch("中文");
+    expect(result.total).toBe(1);
+    expect(result.results[0].contentReason).toContain("不一致");
+  });
+  it("rejects an interim cached source ID when refreshed current content replaces it", async () => {
+    await loadSearch();
+    await settled();
+    let resolve!: (value: Snapshot) => void;
+    mocks.readSnapshot.mockImplementation(
+      async (deviceId: string, kind: string) =>
+        kind === "current"
+          ? new Promise<Snapshot>((r) => {
+              resolve = r;
+            })
+          : snapshot(deviceId),
+    );
+    await loadSearch();
+    for (let i = 0; i < 50 && !resolve; i++)
+      await new Promise((r) => setTimeout(r, 1));
+    const interim = (await searchStatus()).sources.find(
+      (source) => source.kind === "current",
+    )!;
+    expect((await getSearchSource(interim.id)).snapshot?.snapshotId).toBe(
+      "snapshot-1",
+    );
+    const oldLeaf = JSON.stringify([interim.id, "window-1", "tab-1"]);
+    expect((await getSearchResult(oldLeaf)).title).toBe("中文研究");
+    resolve(snapshot("device-A", "New current content", 3));
+    await settled();
+    await expect(getSearchSource(interim.id)).rejects.toThrow();
+    await expect(getSearchResult(oldLeaf)).rejects.toThrow();
+    expect((await querySearch("New current content")).total).toBe(1);
+  });
+  it("bounds combined metadata and body cache, preserving metadata when body is over budget", async () => {
+    const prior = SEARCH_LIMITS.bytes;
+    SEARCH_LIMITS.bytes = 6000;
+    mocks.listHistory.mockResolvedValue([]);
+    mocks.readText.mockResolvedValue("bodytext".repeat(2500));
+    mocks.readSnapshot.mockImplementation(async () => {
+      const value = snapshot();
+      value.schemaVersion = 2;
+      value.snapshotId = "20261021-100000Z-r000001";
+      value.windows[0].tabs = value.windows[0].tabs.slice(0, 1);
+      value.windows[0].tabs[0].content = {
+        status: "available",
+        ref: {
+          ownerDeviceId: "device-A",
+          objectId: "a".repeat(64),
+          bytes: 20000,
+          observedAt: value.capturedAt,
+          captureUrl: value.windows[0].tabs[0].url,
+        },
+      };
+      return value;
+    });
+    try {
+      await loadSearch();
+      const status = await settled();
+      expect(status.truncated).toBe(true);
+      expect(
+        new TextEncoder().encode(JSON.stringify(session.searchCache)).length,
+      ).toBeLessThanOrEqual(6000);
+      expect((await querySearch("中文")).total).toBe(1);
+      expect((await querySearch("bodytext")).total).toBe(0);
+    } finally {
+      SEARCH_LIMITS.bytes = prior;
+    }
+  });
+  it.each(["missing", "tampered"])(
+    "local clear and rebuild recover from %s encrypted payloads",
+    async (mode) => {
+      await loadSearch();
+      await settled();
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("tabrelay-search-v2", 1);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      await new Promise<void>((resolve, reject) => {
+        const tx = database.transaction("records", "readwrite"),
+          store = tx.objectStore("records");
+        if (mode === "missing") store.clear();
+        else {
+          const cursor = store.openCursor();
+          cursor.onsuccess = () => {
+            const current = cursor.result;
+            if (current) {
+              const value = current.value;
+              value.ciphertext = new Uint8Array([1, 2, 3]).buffer;
+              current.update(value);
+              current.continue();
+            }
+          };
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      database.close();
+      vi.resetModules();
+      const restarted = await import("../src/search");
+      await expect(restarted.searchStatus()).rejects.toMatchObject({
+        code: "corrupt",
+      });
+      if (mode === "missing") {
+        await restarted.clearSearch(true);
+        expect((await restarted.querySearch("")).total).toBe(0);
+      }
+      await restarted.rebuildSearch();
+      for (let n = 0; n < 100; n++) {
+        if (!(await restarted.searchStatus()).loading) break;
+        await new Promise((r) => setTimeout(r, 1));
+      }
+      expect((await restarted.querySearch("中文")).total).toBe(1);
+      await restarted.clearSearch();
+    },
+  );
 });

@@ -1,9 +1,11 @@
 /** Search service integration against simulated session storage and WebDAV, not browser E2E. */
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
 import { DEFAULT_SETTINGS } from "../src/model";
 import type { Snapshot } from "../src/types";
 let state: any,
   session: Record<string, any>,
+  local: Record<string, any>,
   listDevices: any,
   readSnapshot: any,
   listHistory: any;
@@ -72,7 +74,9 @@ function deferred<T>() {
 }
 beforeEach(() => {
   vi.resetModules();
+  vi.stubGlobal("indexedDB", new IDBFactory());
   session = {};
+  local = {};
   state = {
     deviceId: "local-device",
     settings: {
@@ -99,6 +103,12 @@ beforeEach(() => {
   }));
   vi.stubGlobal("chrome", {
     storage: {
+      local: {
+        get: async (key: string) => ({ [key]: clone(local[key]) }),
+        set: async (values: any) => {
+          Object.assign(local, clone(values));
+        },
+      },
       session: {
         get: async (key: string) => ({ [key]: clone(session[key]) }),
         set: async (values: any) => {
@@ -129,11 +139,11 @@ describe("search loading lifecycle and truthful coverage", () => {
     ).toBe("loaded");
     expect(
       after.coverage.sources.find((s) => s.kind === "history")?.status,
-    ).toBe("not-loaded");
+    ).toBe("loaded");
     expect(after.coverage.updatedAt).toEqual(expect.any(String));
-    expect(listHistory).not.toHaveBeenCalled();
+    expect(listHistory).toHaveBeenCalled();
   });
-  it("records source failure separately from empty recovery and unrequested history", async () => {
+  it("records source failure separately from empty recovery and loaded retained history", async () => {
     const search = await import("../src/search");
     listDevices.mockResolvedValue(devices("device-a", "device-b"));
     readSnapshot.mockImplementation(async (deviceId: string, kind: string) => {
@@ -155,7 +165,8 @@ describe("search loading lifecycle and truthful coverage", () => {
       )?.status,
     ).toBe("loaded");
     const result = await search.querySearch("GPU");
-    expect(result.total).toBe(3);
+    expect(result.total).toBe(1);
+    expect(result.occurrenceTotal).toBe(3);
     expect(result.results.every((r) => !r.url.includes("secret"))).toBe(true);
     expect(result.coverage.sources.every((s) => s.snapshot === undefined)).toBe(
       true,
@@ -239,11 +250,53 @@ describe("search loading lifecycle and truthful coverage", () => {
     expect(after.coverage.error).toContain("配置");
     expect(after.coverage.sources).toEqual([]);
   });
+  it("clear pauses across module restart and session loss until explicit rebuild", async () => {
+    const search = await import("../src/search");
+    await search.autoSearch();
+    await settle(async () => !(await search.searchStatus()).loading);
+    await search.clearSearch(true);
+    const calls = listDevices.mock.calls.length;
+    session = {};
+    vi.resetModules();
+    const reopened = await import("../src/search");
+    expect((await reopened.autoSearch()).paused).toBe(true);
+    expect(listDevices).toHaveBeenCalledTimes(calls);
+    expect((await reopened.querySearch("GPU")).total).toBe(0);
+    await reopened.rebuildSearch();
+    await settle(async () => !(await reopened.searchStatus()).loading);
+    expect((await reopened.searchStatus()).paused).toBe(false);
+    expect((await reopened.querySearch("GPU")).total).toBe(1);
+  });
+  it("keypress auto-load keeps fresh identities stable and failed refresh retains stale searchable data", async () => {
+    const search = await import("../src/search");
+    await search.autoSearch();
+    await settle(async () => !(await search.searchStatus()).loading);
+    const before = await search.querySearch("GPU");
+    const calls = readSnapshot.mock.calls.length;
+    await search.autoSearch();
+    expect(readSnapshot).toHaveBeenCalledTimes(calls);
+    expect((await search.querySearch("GPU")).results[0].id).toBe(
+      before.results[0].id,
+    );
+    readSnapshot.mockRejectedValue(new FakeWebDAVError("network", "离线"));
+    await search.loadSearch();
+    await settle(async () => !(await search.searchStatus()).loading);
+    const after = await search.querySearch("GPU");
+    expect(after.total).toBe(1);
+    expect(
+      after.coverage.sources.find((source) => source.kind === "current"),
+    ).toMatchObject({ status: "loaded", stale: true, errorCode: "network" });
+    expect(
+      readSnapshot.mock.calls
+        .slice(calls)
+        .every((args: any[]) => args[1] !== "history"),
+    ).toBe(true);
+  });
   it("worker-module restart reports interrupted load without silently resuming network", async () => {
     const search = await import("../src/search");
     await search.loadSearch(false);
     await settle(async () => !(await search.searchStatus()).loading);
-    session.searchCache.loading = true;
+    session.searchCache.control.loading = true;
     const calls = listDevices.mock.calls.length;
     vi.resetModules();
     const restarted = await import("../src/search");

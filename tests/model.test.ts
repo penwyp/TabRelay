@@ -60,7 +60,7 @@ describe("snapshot security and limits (pure unit tests)", () => {
     null,
     [],
     {},
-    { ...snapshot(), schemaVersion: 2 },
+    { ...snapshot(), schemaVersion: 3 },
     { ...snapshot(), revision: -1 },
     { ...snapshot(), capturedAt: "bad" },
   ])("rejects invalid top-level metadata %#", (raw) =>

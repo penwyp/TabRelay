@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
 import { DEFAULT_SETTINGS } from "../src/model";
 import type { Snapshot } from "../src/types";
 let store: Record<string, any>,
@@ -47,7 +48,8 @@ async function send(
 }
 beforeEach(() => {
   vi.resetModules();
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.stubGlobal("indexedDB", new IDBFactory());
   store = {
     state: {
       deviceId: "local-device",
@@ -128,7 +130,7 @@ beforeEach(() => {
     tabGroups: {},
     alarms: { create: vi.fn(async () => {}), onAlarm: event() },
     sidePanel: { setPanelBehavior: vi.fn(async () => {}) },
-    permissions: { contains: vi.fn(async () => true) },
+    permissions: { contains: vi.fn(async () => true), onRemoved: event() },
   };
   for (const k of [
     "onCreated",
@@ -235,13 +237,34 @@ describe("sync coordinator with simulated events/storage and repository", () => 
     collect.mockResolvedValue(snap("newer", "https://newer.org/"));
     await sync(true);
     expect(publish.mock.calls[1][0].snapshotId).toBe("first");
-    expect(collect).toHaveBeenCalledTimes(1);
-    expect(store.state.sync.dirty).toBe(true);
-    await sync(true);
     expect(collect).toHaveBeenCalledTimes(2);
     expect(publish.mock.calls[2][0].snapshotId).toBe("newer");
+    expect(publish).toHaveBeenCalledTimes(3);
+    expect(store.state.sync.dirty).toBe(false);
   });
-  it("does not label a newer restore synced when merely reconciling an older pending snapshot", async () => {
+  it("manual restore sync reconciles old pending first then immediately publishes fresh workspace", async () => {
+    store.state.sync.pending = snap("before-restore");
+    store.state.settings.syncIntervalMinutes = 1440;
+    store.state.operation = {
+      id: "new-restore",
+      status: "COMPLETED",
+      syncStatus: "pending",
+    };
+    collect.mockResolvedValue(snap("after-restore", "https://newer.org/"));
+    publish.mockImplementation(async () => {
+      expect(store.state.operation.syncStatus).toBe("pending");
+      return { etag: '"next"' };
+    });
+    const { sync } = await import("../src/background");
+    await sync(true);
+    expect(publish.mock.calls.map((args: any[]) => args[0].snapshotId)).toEqual(
+      ["before-restore", "after-restore"],
+    );
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(store.state.sync.dirty).toBe(false);
+    expect(store.state.operation.syncStatus).toBe("synced");
+  });
+  it("automatic due reconciliation remains one pass and does not falsely mark newer restore synced", async () => {
     store.state.sync.pending = snap("before-restore");
     store.state.operation = {
       id: "new-restore",
@@ -249,10 +272,36 @@ describe("sync coordinator with simulated events/storage and repository", () => 
       syncStatus: "pending",
     };
     const { sync } = await import("../src/background");
-    await sync(true);
-    expect(publish.mock.calls[0][0].snapshotId).toBe("before-restore");
+    await send({ type: "GET_STATE" });
+    vi.setSystemTime(store.state.sync.nextDueAt + 1);
+    await sync(false);
+    expect(publish.mock.calls.map((args: any[]) => args[0].snapshotId)).toEqual(
+      ["before-restore"],
+    );
+    expect(collect).not.toHaveBeenCalled();
     expect(store.state.sync.dirty).toBe(true);
     expect(store.state.operation.syncStatus).toBe("pending");
+  });
+  it("bounds pending-followup to two passes and preserves failed fresh publish for retry", async () => {
+    store.state.sync.pending = snap("old");
+    store.state.operation = {
+      id: "restored",
+      status: "COMPLETED",
+      syncStatus: "pending",
+    };
+    collect.mockResolvedValue(snap("fresh"));
+    publish
+      .mockResolvedValueOnce({ etag: '"old"' })
+      .mockRejectedValueOnce(Error("offline during fresh publish"));
+    const { sync } = await import("../src/background");
+    await sync(true);
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(publish.mock.calls.map((args: any[]) => args[0].snapshotId)).toEqual(
+      ["old", "fresh"],
+    );
+    expect(store.state.sync.pending.snapshotId).toBe("fresh");
+    expect(store.state.operation.syncStatus).toBe("pending");
+    expect(store.state.sync.dirty).toBe(true);
   });
   it("marks restore synced after retry and unchanged-current reconciliation", async () => {
     store.state.operation = {
@@ -264,7 +313,7 @@ describe("sync coordinator with simulated events/storage and repository", () => 
     publish.mockRejectedValueOnce(Error("temporary network error"));
     await sync(true);
     await sync(true);
-    vi.setSystemTime(Date.now() + 5000);
+    vi.setSystemTime(store.state.sync.nextDueAt + 1);
     await sync(false);
     expect(store.state.sync.dirty).toBe(false);
     expect(store.state.operation.syncStatus).toBe("synced");
@@ -325,6 +374,89 @@ describe("sync coordinator with simulated events/storage and repository", () => 
     release();
     await run;
   });
+  it.each([
+    { blacklist: ["example.org"] },
+    { stripParams: ["private"] },
+    { contentEnabled: true, contentOrigins: ["https://example.org"] },
+    { contentOrigins: ["https://example.org"] },
+  ])(
+    "refuses privacy policy mutation while uncertain pending remains at the same endpoint (%j)",
+    async (patch) => {
+      store.state.sync.pending = snap("uncertain");
+      const original = copy(store.state.settings);
+      await import("../src/background");
+      const result = await send({
+        type: "SAVE_SETTINGS",
+        settings: { ...original, ...patch },
+      });
+      expect(result.ok).toBe(false);
+      expect(store.state.settings).toEqual(original);
+      expect(store.state.sync.pending.snapshotId).toBe("uncertain");
+      expect(publish).not.toHaveBeenCalled();
+      expect(
+        (
+          await send({
+            type: "SAVE_SETTINGS",
+            settings: { ...original, enabled: false },
+          })
+        ).ok,
+      ).toBe(true);
+      expect(store.state.settings.enabled).toBe(false);
+    },
+  );
+  it("blocks key rotation at an endpoint that received body objects even before snapshot revision 1", async () => {
+    store.state.contentObjectEndpoint = store.state.settings.endpoint;
+    store.state.sync.revision = 0;
+    await import("../src/background");
+    const result = await send({
+      type: "SAVE_SETTINGS",
+      settings: {
+        ...store.state.settings,
+        encryptionPassphrase: "rotated-key",
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(store.state.settings.encryptionPassphrase).toBe("");
+  });
+  it.each(["endpoint", "policy"])(
+    "clears old body refs and capture coverage on %s change",
+    async (change) => {
+      const content = {
+        status: "available",
+        ref: {
+          ownerDeviceId: "local-device",
+          objectId: "a".repeat(64),
+          bytes: 12,
+          observedAt: "2026-10-31T00:00:00Z",
+          captureUrl: "https://example.org/",
+        },
+      };
+      store.state.current = snap();
+      store.state.current.windows[0].tabs[0].content = copy(content);
+      store.state.identities.tabs[1] = {
+        key: "t",
+        url: "https://example.org/",
+        windowKey: "w",
+        content: copy(content),
+      };
+      store.state.contentCapture = { sampled: 1 };
+      await import("../src/background");
+      const result = await send({
+        type: "SAVE_SETTINGS",
+        settings: {
+          ...store.state.settings,
+          enabled: false,
+          ...(change === "endpoint"
+            ? { endpoint: "https://new-dav.example.org/" }
+            : { contentOrigins: ["https://example.org"] }),
+        },
+      });
+      expect(result.ok).toBe(true);
+      expect(store.state.current.windows[0].tabs[0].content).toBeUndefined();
+      expect(store.state.identities.tabs[1].content).toBeUndefined();
+      expect(store.state.contentCapture).toBeUndefined();
+    },
+  );
   it("requires a new endpoint before changing an existing encrypted history key", async () => {
     await import("../src/background");
     store.state.sync.revision = 3;
@@ -407,6 +539,118 @@ describe("sync coordinator with simulated events/storage and repository", () => 
     expect(store.state.settings.endpoint).toBe(
       "https://secure.example.org/root/",
     );
+  });
+  it.each([5, 10, 30, 60, 1440])(
+    "saves the supported %i minute cadence",
+    async (minutes) => {
+      await import("../src/background");
+      const result = await send({
+        type: "SAVE_SETTINGS",
+        settings: {
+          ...store.state.settings,
+          enabled: false,
+          syncIntervalMinutes: minutes,
+        },
+      });
+      expect(result.ok).toBe(true);
+      expect(store.state.settings.syncIntervalMinutes).toBe(minutes);
+    },
+  );
+  it("migrates missing cadence and keeps body capture opt-in", async () => {
+    delete store.state.settings.syncIntervalMinutes;
+    delete store.state.settings.contentEnabled;
+    delete store.state.settings.contentOrigins;
+    await import("../src/background");
+    const result = await send({ type: "GET_STATE" });
+    expect(result.data.settings.syncIntervalMinutes).toBe(10);
+    expect(result.data.settings.contentEnabled).toBe(false);
+    expect(result.data.settings.contentOrigins).toEqual([]);
+  });
+  it("tab events mark dirty but do not publish before the scheduled due time", async () => {
+    store.state.sync.dirty = false;
+    store.state.sync.nextDueAt = Date.now() + 10 * 60_000;
+    const { sync } = await import("../src/background");
+    await send({ type: "GET_STATE" });
+    const callback = chromeMock.tabs.onCreated.addListener.mock.calls[0][0];
+    callback({ id: 15, url: "https://example.org/" });
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(store.state.sync.dirty).toBe(true);
+    expect(publish).not.toHaveBeenCalled();
+    await sync(false);
+    expect(publish).not.toHaveBeenCalled();
+    await sync(true);
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+  it("publishes dirty state once due and advances next due by its chosen cadence", async () => {
+    store.state.settings.syncIntervalMinutes = 30;
+    store.state.sync.nextDueAt = Date.now() - 1;
+    const { sync } = await import("../src/background");
+    await send({ type: "GET_STATE" });
+    vi.setSystemTime(Date.now() + 5000);
+    const now = Date.now();
+    await sync(false);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(store.state.sync.nextDueAt).toBeGreaterThanOrEqual(
+      now + 30 * 60_000,
+    );
+    expect(store.state.sync.dirty).toBe(false);
+    await sync(false);
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+  it("refuses body capture consent for wildcard origins or missing scripting permission", async () => {
+    await import("../src/background");
+    const wildcard = await send({
+      type: "SAVE_SETTINGS",
+      settings: {
+        ...store.state.settings,
+        enabled: false,
+        contentEnabled: true,
+        contentOrigins: ["https://*.example.org"],
+      },
+    });
+    expect(wildcard.ok).toBe(false);
+    chromeMock.permissions.contains.mockResolvedValue(false);
+    const missing = await send({
+      type: "SAVE_SETTINGS",
+      settings: {
+        ...store.state.settings,
+        enabled: false,
+        contentEnabled: true,
+        contentOrigins: ["https://example.org"],
+      },
+    });
+    expect(missing.ok).toBe(false);
+    expect(store.state.settings.contentEnabled).toBe(false);
+  });
+  it("permission removal purges body refs and search, invalidates plan, pauses sync, but preserves uncertain pending", async () => {
+    const content = { status: "available", ref: { objectId: "a".repeat(64) } };
+    store.state.current = snap();
+    store.state.current.windows[0].tabs[0].content = copy(content);
+    store.state.identities.tabs[1] = {
+      key: "t",
+      url: "https://example.org/",
+      content: copy(content),
+    };
+    store.state.contentCapture = { sampled: 1 };
+    store.state.sync.pending = snap("uncertain");
+    store.restorePlan = { id: "stale-plan" };
+    await import("../src/background");
+    await send({ type: "GET_STATE" });
+    chromeMock.permissions.onRemoved.addListener.mock.calls[0][0]({
+      permissions: ["scripting"],
+    });
+    await vi.waitFor(() => expect(store.state.settings.enabled).toBe(false));
+    expect(store.restorePlan).toBeUndefined();
+    expect(store.state.current.windows[0].tabs[0].content).toBeUndefined();
+    expect(store.state.identities.tabs[1].content).toBeUndefined();
+    expect(store.state.contentCapture).toBeUndefined();
+    expect(store.state.sync.pending.snapshotId).toBe("uncertain");
+    expect(store.state.sync.dirty).toBe(true);
+    expect(store.state.sync.errorCode).toBe("permission-denied");
+    const status = await send({ type: "SEARCH_STATUS" });
+    expect(status.data.paused).toBe(true);
+    expect(status.data.sources).toEqual([]);
+    expect(publish).not.toHaveBeenCalled();
   });
   it("rejects content-script or foreign senders before exposing credentials", async () => {
     await import("../src/background");

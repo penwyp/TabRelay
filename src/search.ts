@@ -1,6 +1,15 @@
+import {
+  readSearchStore,
+  writeSearchStore,
+  clearSearchStore,
+  estimateSearchStoreBytes,
+  SEARCH_STORE_BYTES,
+  SearchStoreError,
+  searchStoreGeneration,
+} from "./search-store";
 import { hash, safeUrl, validateSnapshot } from "./model";
 import { load } from "./state";
-import type { Settings, Snapshot } from "./types";
+import type { Settings, Snapshot, TabContent, TextRef } from "./types";
 import { WebDAVError, WebDAVRepository } from "./webdav";
 
 export type SearchSource = {
@@ -15,11 +24,13 @@ export type SearchSource = {
   errorCode?: string;
   loadedAt?: string;
   capturedAt?: string;
+  stale?: boolean;
 };
 export type SearchCache = {
   generation: number;
   loading: boolean;
   cancelled: boolean;
+  paused: boolean;
   includeHistory: boolean;
   sources: SearchSource[];
   devicesTotal: number;
@@ -27,8 +38,12 @@ export type SearchCache = {
   completed: number;
   total: number;
   truncated: boolean;
+  bodyLoaded: number;
+  bodyMissing: number;
+  bodyTruncated: number;
   error?: string;
   updatedAt?: string;
+  refreshedAt?: string;
   earliestObservedAt?: string;
 };
 export type SearchFilters = {
@@ -56,47 +71,92 @@ export type SearchResult = {
   groupKey?: string;
   groupTitle?: string;
   stale: boolean;
+  bodySnippet?: string;
+  contentStatus?: string;
+  contentReason?: string;
+  occurrences?: SearchResult[];
 };
-type StoredCache = SearchCache & { configFingerprint?: string };
+type BodyEntry = {
+  text?: string;
+  identity?: string;
+  status: "loaded" | "missing" | "truncated";
+  reason?: string;
+};
+type StoredCache = SearchCache & {
+  configFingerprint?: string;
+  bodies: Record<string, BodyEntry>;
+};
+type InternalResult = SearchResult & {
+  bodyText?: string;
+  bodyIdentity: string;
+};
 export const SEARCH_LIMITS = {
-  snapshots: 300,
-  tabs: 30_000,
+  snapshots: 2000,
+  tabs: 200_000,
   sources: 2000,
-  // Conservative serialized budget: session quota measures in-memory allocation,
-  // so leave room for UTF-16 strings, object overhead and other session data.
-  bytes: 3 * 1024 * 1024,
+  bytes: SEARCH_STORE_BYTES,
 };
-const CACHE_KEY = "searchCache";
-let token = 0;
-let running = false;
+const CACHE_KEY = "searchCache",
+  PAUSE_KEY = "searchAutoPaused",
+  FRESH_MS = 5 * 60_000;
+let token = 0,
+  running = false;
 let queue: Promise<unknown> = Promise.resolve();
-const empty = (generation = 0): StoredCache => ({
+const empty = (generation = 0, paused = false): StoredCache => ({
   generation,
   loading: false,
   cancelled: false,
-  includeHistory: false,
+  paused,
+  includeHistory: true,
   sources: [],
+  bodies: {},
   devicesTotal: 0,
   devicesLoaded: 0,
   completed: 0,
   total: 0,
   truncated: false,
+  bodyLoaded: 0,
+  bodyMissing: 0,
+  bodyTruncated: 0,
 });
 function serial<T>(fn: () => Promise<T>): Promise<T> {
-  const promise = queue.then(fn);
-  queue = promise.catch(() => {});
-  return promise;
+  const p = queue.then(fn);
+  queue = p.catch(() => {});
+  return p;
+}
+const now = () => new Date().toISOString();
+const bytes = estimateSearchStoreBytes;
+const keyOf = (source: Pick<SearchSource, "deviceId" | "kind" | "historyId">) =>
+  JSON.stringify([source.deviceId, source.kind, source.historyId ?? ""]);
+const bodyKey = (ref: TextRef) => `${ref.ownerDeviceId}:${ref.objectId}`;
+const newSourceId = (
+  epoch: string,
+  source: Pick<SearchSource, "deviceId" | "kind" | "historyId">,
+) => JSON.stringify([epoch, keyOf(source), crypto.randomUUID()]);
+async function paused() {
+  return !!(await chrome.storage.local.get(PAUSE_KEY))[PAUSE_KEY];
 }
 async function stored(): Promise<StoredCache> {
-  const result = await chrome.storage.session.get(CACHE_KEY);
-  return (result[CACHE_KEY] as StoredCache | undefined) ?? empty();
+  return (await readSearchStore<StoredCache>()) ?? empty(0, await paused());
 }
-async function fingerprint(): Promise<string> {
+function mutableCache(cache: StoredCache): StoredCache {
+  return {
+    ...cache,
+    sources: cache.sources.map((source) => ({ ...source })),
+    bodies: { ...cache.bodies },
+  };
+}
+
+async function fingerprint() {
   const state = await load();
   return hash({ deviceId: state.deviceId, settings: state.settings });
 }
 function publicCache(cache: StoredCache): SearchCache {
-  const { configFingerprint: _private, ...coverage } = cache;
+  const {
+    configFingerprint: _fingerprint,
+    bodies: _bodies,
+    ...coverage
+  } = cache;
   return {
     ...coverage,
     sources: coverage.sources.map(
@@ -104,93 +164,178 @@ function publicCache(cache: StoredCache): SearchCache {
     ),
   };
 }
-function time(): string {
-  return new Date().toISOString();
+function errorInfo(error: unknown) {
+  return error instanceof WebDAVError
+    ? { error: error.message, errorCode: error.code }
+    : { error: "来源读取或校验失败，请稍后重试。", errorCode: "invalid-data" };
 }
-
-function errorInfo(error: unknown): { error: string; errorCode: string } {
-  if (error instanceof WebDAVError) {
-    return { error: error.message, errorCode: error.code };
-  }
-  // Do not cache arbitrary exception text; it may contain server URLs or secrets.
+function sanitizedContent(
+  value: unknown,
+  originalUrl: string,
+  url: string,
+): TabContent | undefined {
+  if (value === undefined) return undefined;
+  const unavailable = (reason: string): TabContent => ({
+    status: "unavailable",
+    reason,
+  });
+  if (!value || typeof value !== "object")
+    return unavailable("正文状态格式无效，仍可搜索标签信息。");
+  const content = value as TabContent;
+  if (
+    ![
+      "available",
+      "disabled",
+      "permission-denied",
+      "unavailable",
+      "truncated",
+    ].includes(content.status)
+  )
+    return unavailable("未知正文状态。");
+  const reason =
+    typeof content.reason === "string"
+      ? content.reason.slice(0, 1000)
+      : undefined;
+  if (!["available", "truncated"].includes(content.status))
+    return { status: content.status, reason };
+  const ref = content.ref;
+  if (
+    !ref ||
+    typeof ref.ownerDeviceId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(ref.ownerDeviceId) ||
+    typeof ref.objectId !== "string" ||
+    !/^[a-f0-9]{64}$/.test(ref.objectId) ||
+    !Number.isSafeInteger(ref.bytes) ||
+    ref.bytes < 0 ||
+    ref.bytes > 60_000 ||
+    typeof ref.observedAt !== "string" ||
+    !Number.isFinite(Date.parse(ref.observedAt)) ||
+    typeof ref.captureUrl !== "string"
+  )
+    return unavailable("正文引用无效，未发送正文请求。");
+  // Match the captured page BEFORE privacy normalization, not only after removing parameters.
+  if (
+    safeUrl(ref.captureUrl) !== safeUrl(originalUrl) ||
+    !safeUrl(ref.captureUrl)
+  )
+    return unavailable("正文采集地址与此标签不一致，未读取过期正文。");
   return {
-    error: "快照读取或校验失败，请检查来源后重试。",
-    errorCode: "invalid-data",
+    status: content.status,
+    reason,
+    ref: {
+      ownerDeviceId: ref.ownerDeviceId,
+      objectId: ref.objectId,
+      bytes: ref.bytes,
+      observedAt: ref.observedAt,
+      captureUrl: url,
+    },
   };
 }
 function cleanSnapshot(raw: Snapshot, settings: Settings): Snapshot {
-  const validated = validateSnapshot(raw);
-  // Whitelist persisted fields; untrusted extra properties never enter the cache.
-  const snapshot: Snapshot = {
-    schemaVersion: 1,
+  const without = structuredClone(raw),
+    rawContent = new Map<string, unknown>();
+  if (Array.isArray(without.windows))
+    for (const window of without.windows)
+      if (window && Array.isArray(window.tabs))
+        for (const tab of window.tabs)
+          if (tab && typeof tab === "object") {
+            rawContent.set(tab.tabKey, tab.content);
+            delete tab.content;
+          }
+  const validated = validateSnapshot(without);
+  return {
+    schemaVersion: validated.schemaVersion,
     deviceId: validated.deviceId,
     snapshotId: validated.snapshotId,
     revision: validated.revision,
     capturedAt: validated.capturedAt,
-    windows: validated.windows.map((window) => ({
-      windowKey: window.windowKey,
-      order: window.order,
-      activeTabKey: window.activeTabKey,
-      groups: window.groups.map((group) => ({
-        groupKey: group.groupKey,
-        title: group.title,
-        color: group.color,
-        collapsed: group.collapsed,
-      })),
-      tabs: window.tabs.map((tab) => ({
-        tabKey: tab.tabKey,
-        url: tab.url,
-        title: tab.title,
-        index: tab.index,
-        pinned: tab.pinned,
-        groupKey: tab.groupKey,
-        origin: { deviceId: tab.origin.deviceId, tabKey: tab.origin.tabKey },
-      })),
-    })),
+    windows: validated.windows
+      .map((window) => {
+        const tabs = window.tabs.flatMap((tab) => {
+          const url = safeUrl(tab.url, settings);
+          return url
+            ? [
+                {
+                  tabKey: tab.tabKey,
+                  url,
+                  title: tab.title,
+                  index: tab.index,
+                  pinned: tab.pinned,
+                  groupKey: tab.groupKey,
+                  origin: {
+                    deviceId: tab.origin.deviceId,
+                    tabKey: tab.origin.tabKey,
+                  },
+                  content:
+                    validated.schemaVersion === 2
+                      ? sanitizedContent(
+                          rawContent.get(tab.tabKey),
+                          tab.url,
+                          url,
+                        )
+                      : undefined,
+                },
+              ]
+            : [];
+        });
+        return {
+          windowKey: window.windowKey,
+          order: window.order,
+          activeTabKey: tabs.some((tab) => tab.tabKey === window.activeTabKey)
+            ? window.activeTabKey
+            : tabs[0]?.tabKey,
+          groups: window.groups
+            .filter((group) =>
+              tabs.some((tab) => tab.groupKey === group.groupKey),
+            )
+            .map((group) => ({
+              groupKey: group.groupKey,
+              title: group.title,
+              color: group.color,
+              collapsed: group.collapsed,
+            })),
+          tabs,
+        };
+      })
+      .filter((window) => window.tabs.length > 0),
   };
-  snapshot.windows = snapshot.windows
-    .map((window) => {
-      const tabs = window.tabs.flatMap((tab) => {
-        const url = safeUrl(tab.url, settings);
-        return url ? [{ ...tab, url }] : [];
-      });
-      const groups = window.groups.filter((group) =>
-        tabs.some((tab) => tab.groupKey === group.groupKey),
-      );
-      return {
-        ...window,
-        tabs,
-        groups,
-        activeTabKey: tabs.some((tab) => tab.tabKey === window.activeTabKey)
-          ? window.activeTabKey
-          : tabs[0]?.tabKey,
-      };
-    })
-    .filter((window) => window.tabs.length > 0);
-  return snapshot;
 }
-function recalculate(cache: StoredCache): void {
-  const finished = cache.sources.filter(
+function recalculate(cache: StoredCache) {
+  cache.completed = cache.sources.filter(
     (source) => source.status !== "not-loaded",
-  );
-  cache.completed = finished.length;
+  ).length;
   cache.total = cache.sources.length;
   cache.devicesLoaded = new Set(
     cache.sources
-      .filter((source) => source.status === "loaded")
+      .filter((source) => source.snapshot)
       .map((source) => source.deviceId),
   ).size;
-  const timestamps = cache.sources.flatMap((source) =>
-    source.status === "loaded" && source.capturedAt ? [source.capturedAt] : [],
-  );
-  cache.earliestObservedAt = timestamps.sort(
-    (a, b) => Date.parse(a) - Date.parse(b),
-  )[0];
-  cache.updatedAt = time();
+  cache.earliestObservedAt = cache.sources
+    .flatMap((source) => (source.snapshot ? [source.snapshot.capturedAt] : []))
+    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const refs = new Set<string>();
+  let unavailable = 0;
+  for (const source of cache.sources)
+    for (const window of source.snapshot?.windows ?? [])
+      for (const tab of window.tabs) {
+        if (tab.content?.ref) refs.add(bodyKey(tab.content.ref));
+        else unavailable++;
+      }
+  cache.bodyLoaded = [...refs].filter(
+    (key) => cache.bodies[key]?.text !== undefined,
+  ).length;
+  cache.bodyMissing =
+    unavailable +
+    [...refs].filter(
+      (key) => !cache.bodies[key] || cache.bodies[key].status === "missing",
+    ).length;
+  cache.bodyTruncated = [...refs].filter(
+    (key) => cache.bodies[key]?.status === "truncated",
+  ).length;
+  cache.updatedAt = now();
 }
-/** Must run inside the serial queue. */
 async function checkedCache(): Promise<StoredCache> {
-  let cache = await stored();
+  let cache = { ...(await stored()), paused: await paused() };
   if (
     cache.configFingerprint &&
     cache.configFingerprint !== (await fingerprint())
@@ -198,32 +343,34 @@ async function checkedCache(): Promise<StoredCache> {
     ++token;
     running = false;
     cache = {
-      ...empty(cache.generation + 1),
+      ...empty(cache.generation + 1, cache.paused),
       error: "配置或隐私规则已变化，请重新加载搜索数据。",
     };
-    await chrome.storage.session.set({ [CACHE_KEY]: cache });
+    await clearSearchStore();
+    await writeSearchStore(cache);
   } else if (cache.loading && !running) {
     cache = {
       ...cache,
       loading: false,
       cancelled: true,
-      error: "搜索加载被中断；已加载数据仍可搜索，请手动刷新补齐。",
-      updatedAt: time(),
+      error: "加载被中断，已加载数据仍可搜索；下次刷新会补齐。",
     };
-    await chrome.storage.session.set({ [CACHE_KEY]: cache });
+    await writeSearchStore(cache);
   }
   return cache;
 }
 export async function searchStatus(): Promise<SearchCache> {
   return serial(async () => publicCache(await checkedCache()));
 }
-export async function clearSearch(): Promise<SearchCache> {
+export async function clearSearch(pause = false): Promise<SearchCache> {
   ++token;
   running = false;
   return serial(async () => {
-    const old = await stored();
-    const cache = empty(old.generation + 1);
-    await chrome.storage.session.set({ [CACHE_KEY]: cache });
+    const generation = await searchStoreGeneration();
+    await chrome.storage.local.set({ [PAUSE_KEY]: pause });
+    const cache = empty(generation + 1, pause);
+    await clearSearchStore();
+    await writeSearchStore(cache);
     return publicCache(cache);
   });
 }
@@ -232,47 +379,83 @@ export async function cancelSearch(): Promise<SearchCache> {
   running = false;
   return serial(async () => {
     const old = await stored();
+    await chrome.storage.local.set({ [PAUSE_KEY]: true });
     const cache = {
       ...old,
       generation: old.generation + 1,
       loading: false,
       cancelled: true,
-      error: "已取消加载；已加载的数据仍可搜索。",
-      updatedAt: time(),
+      paused: true,
+      error: "已暂停加载，已加载数据仍可搜索；点击重建索引恢复。",
+      updatedAt: now(),
     };
-    await chrome.storage.session.set({ [CACHE_KEY]: cache });
+    await writeSearchStore(cache);
     return publicCache(cache);
   });
 }
-/** Start explicit loading and return immediately. Querying never contacts WebDAV. */
-export async function loadSearch(
-  includeHistory: boolean,
-): Promise<SearchCache> {
+export async function autoSearch(): Promise<SearchCache> {
+  const status = await searchStatus();
+  if (status.paused || status.loading) return status;
+  if (
+    !status.refreshedAt ||
+    Date.now() - Date.parse(status.refreshedAt) >= FRESH_MS
+  )
+    return loadSearch(true);
+  return status;
+}
+export async function rebuildSearch(): Promise<SearchCache> {
+  try {
+    await readSearchStore<StoredCache>();
+  } catch (error) {
+    if (!(error instanceof SearchStoreError) || error.code !== "corrupt")
+      throw error;
+    await clearSearchStore();
+  }
+  await chrome.storage.local.set({ [PAUSE_KEY]: false });
+  return loadSearch(true);
+}
+/** Explicit refresh also unpauses. Every refresh includes all retained history. */
+export async function loadSearch(_includeHistory = true): Promise<SearchCache> {
   const myToken = ++token;
   running = true;
   return serial(async () => {
-    const state = await load();
-    const previous = await stored();
-    const configFingerprint = await hash({
-      deviceId: state.deviceId,
-      settings: state.settings,
-    });
+    const state = await load(),
+      previous = await stored(),
+      configFingerprint = await hash({
+        deviceId: state.deviceId,
+        settings: state.settings,
+      }),
+      epoch = crypto.randomUUID();
+    const reusable =
+      previous.configFingerprint === configFingerprint
+        ? previous
+        : empty(previous.generation);
     const cache: StoredCache = {
-      ...empty(previous.generation + 1),
+      ...reusable,
+      generation: previous.generation + 1,
       loading: true,
-      includeHistory: !!includeHistory,
+      cancelled: false,
+      paused: false,
+      includeHistory: true,
       configFingerprint,
-      updatedAt: time(),
+      error: undefined,
+      truncated: false,
+      updatedAt: now(),
+      sources: reusable.sources.map((source) => ({
+        ...source,
+        id: newSourceId(epoch, source),
+        stale: true,
+      })),
     };
     if (myToken !== token) return publicCache(await stored());
-    await chrome.storage.session.set({ [CACHE_KEY]: cache });
+    await chrome.storage.local.set({ [PAUSE_KEY]: false });
+    await writeSearchStore(cache);
     void runLoad(
       myToken,
       structuredClone(state.settings),
       configFingerprint,
+      epoch,
     ).catch(() => {
-      // Storage/API failure must not create an unhandled rejection. The next
-      // status read marks a persisted loading state as interrupted.
       if (myToken === token) running = false;
     });
     return publicCache(cache);
@@ -280,296 +463,363 @@ export async function loadSearch(
 }
 async function commit(
   myToken: number,
-  expectedFingerprint: string,
+  expected: string,
   mutate: (cache: StoredCache) => void,
 ): Promise<boolean> {
   return serial(async () => {
-    if (token !== myToken) return false;
-    if ((await fingerprint()) !== expectedFingerprint) {
+    if (myToken !== token) return false;
+    if ((await fingerprint()) !== expected) {
       ++token;
       running = false;
       const old = await stored();
-      await chrome.storage.session.set({
-        [CACHE_KEY]: {
-          ...empty(old.generation + 1),
-          error: "配置或隐私规则已变化，搜索加载已取消。",
-        },
+      await clearSearchStore();
+      await writeSearchStore({
+        ...empty(old.generation + 1, await paused()),
+        error: "配置已变化，加载已取消。",
       });
       return false;
     }
-    const cache = await stored();
-    if (token !== myToken || cache.configFingerprint !== expectedFingerprint)
+    const original = await stored();
+    if (myToken !== token || original.configFingerprint !== expected)
       return false;
+    const cache = mutableCache(original),
+      previous = mutableCache(original);
     mutate(cache);
     recalculate(cache);
-    await chrome.storage.session.set({ [CACHE_KEY]: cache });
+    if (bytes(cache) > SEARCH_LIMITS.bytes) {
+      previous.truncated = true;
+      previous.error = "搜索缓存达到 64 MiB 安全预算，部分来源或正文未载入。";
+      previous.loading = cache.loading;
+      recalculate(previous);
+      await writeSearchStore(previous);
+      return true;
+    }
+    try {
+      await writeSearchStore(cache);
+    } catch (error) {
+      if (!(error instanceof SearchStoreError) || error.code !== "limit")
+        throw error;
+      previous.truncated = true;
+      previous.error = error.message;
+      previous.loading = cache.loading;
+      recalculate(previous);
+      await writeSearchStore(previous);
+    }
     return true;
   });
+}
+function upsert(cache: StoredCache, source: SearchSource) {
+  const index = cache.sources.findIndex(
+    (item) => keyOf(item) === keyOf(source),
+  );
+  if (index >= 0) cache.sources[index] = source;
+  else if (cache.sources.length < SEARCH_LIMITS.sources)
+    cache.sources.push(source);
+  else cache.truncated = true;
+}
+function sourceBudget(cache: StoredCache, candidate: SearchSource): boolean {
+  const sources = cache.sources.filter(
+    (source) => keyOf(source) !== keyOf(candidate),
+  );
+  sources.push(candidate);
+  return (
+    sources.filter((source) => source.snapshot).length <=
+      SEARCH_LIMITS.snapshots &&
+    sources.reduce(
+      (sum, source) =>
+        sum +
+        (source.snapshot?.windows.reduce(
+          (n, window) => n + window.tabs.length,
+          0,
+        ) ?? 0),
+      0,
+    ) <= SEARCH_LIMITS.tabs &&
+    bytes({ ...cache, sources }) <= SEARCH_LIMITS.bytes
+  );
 }
 async function runLoad(
   myToken: number,
   settings: Settings,
-  expectedFingerprint: string,
+  expected: string,
+  epoch: string,
 ): Promise<void> {
-  let loadedSnapshots = 0,
-    loadedTabs = 0,
-    snapshotBytes = 0,
-    exhausted = false;
-  const sourceEpoch = crypto.randomUUID();
-  const sourceId = (
-    deviceId: string,
-    kind: SearchSource["kind"],
-    historyId?: string,
-  ): string => JSON.stringify([sourceEpoch, deviceId, kind, historyId ?? ""]);
   try {
     const repo = new WebDAVRepository(settings, {
       shouldContinue: () => myToken === token,
     });
-    const enumerationIssues: {
-      deviceId: string;
-      code: string;
-      message: string;
-    }[] = [];
-    const devices = await repo.listDevices((issue) =>
-      enumerationIssues.push(issue),
-    );
+    const issues: { deviceId: string; code: string; message: string }[] = [];
+    const devices = await repo.listDevices((issue) => issues.push(issue));
     if (
-      !(await commit(myToken, expectedFingerprint, (cache) => {
+      !(await commit(myToken, expected, (cache) => {
         cache.devicesTotal =
           devices.length +
-          enumerationIssues.filter((issue) => issue.deviceId !== "*").length;
-        cache.truncated = enumerationIssues.some(
-          (issue) => issue.code === "limit",
-        );
-        if (enumerationIssues.length)
-          cache.error = "部分远端设备未能枚举或读取，覆盖范围不完整。";
-        cache.sources = devices.flatMap((device) => [
-          {
-            id: sourceId(device.deviceId, "current"),
-            deviceId: device.deviceId,
-            deviceName: device.name,
-            kind: "current" as const,
-            status: "not-loaded" as const,
-          },
-          ...(cache.includeHistory
-            ? []
-            : [
-                {
-                  id: sourceId(device.deviceId, "history", "unloaded"),
-                  deviceId: device.deviceId,
-                  deviceName: device.name,
-                  kind: "history" as const,
-                  status: "not-loaded" as const,
-                  error: "历史及恢复点尚未加载；历史总量未知。",
-                  errorCode: "history-not-loaded",
-                },
-              ]),
+          issues.filter((issue) => issue.deviceId !== "*").length;
+        const known = new Set([
+          ...devices.map((device) => device.deviceId),
+          ...issues.map((issue) => issue.deviceId),
         ]);
-        cache.sources.push(
-          ...enumerationIssues.map((issue, index) => ({
-            id: sourceId(issue.deviceId, "current", `enumeration-${index}`),
-            deviceId: issue.deviceId,
-            deviceName: issue.deviceId === "*" ? "设备枚举" : issue.deviceId,
-            kind: "current" as const,
-            status:
-              issue.code === "limit"
-                ? ("not-loaded" as const)
-                : ("failed" as const),
-            error: issue.message,
-            errorCode: issue.code,
-          })),
-        );
+        if (!issues.some((issue) => issue.deviceId === "*"))
+          cache.sources = cache.sources.filter((source) =>
+            known.has(source.deviceId),
+          );
+        if (issues.length)
+          cache.error = "部分设备枚举失败，覆盖不完整；旧缓存已标记过期。";
+        for (const issue of issues) {
+          if (issue.code === "limit") cache.truncated = true;
+          const old = cache.sources.filter(
+            (source) => source.deviceId === issue.deviceId,
+          );
+          for (const source of old) {
+            source.stale = true;
+            source.error = issue.message;
+            source.errorCode = issue.code;
+          }
+          if (!old.length)
+            upsert(cache, {
+              id: newSourceId(epoch, {
+                deviceId: issue.deviceId,
+                kind: "current",
+              }),
+              deviceId: issue.deviceId,
+              deviceName: issue.deviceId,
+              kind: "current",
+              status: issue.code === "limit" ? "not-loaded" : "failed",
+              error: issue.message,
+              errorCode: issue.code,
+            });
+        }
       }))
     )
       return;
-    const fetchSource = async (source: SearchSource): Promise<boolean> => {
-      if (myToken !== token) return false;
-      if (exhausted) return true;
-      if (
-        loadedSnapshots >= SEARCH_LIMITS.snapshots ||
-        loadedTabs >= SEARCH_LIMITS.tabs ||
-        snapshotBytes >= SEARCH_LIMITS.bytes - 500_000
-      ) {
-        exhausted = true;
-        return commit(myToken, expectedFingerprint, (cache) => {
-          cache.truncated = true;
-          const target = cache.sources.find((item) => item.id === source.id);
-          if (target) {
-            target.error = "达到本地搜索缓存安全上限，未加载此来源。";
-            target.errorCode = "limit";
+    const bodyAttempted = new Set<string>();
+    const loadBodies = async (snapshot: Snapshot): Promise<boolean> => {
+      for (const window of snapshot.windows)
+        for (const tab of window.tabs) {
+          const ref = tab.content?.ref;
+          if (!ref) continue;
+          const key = bodyKey(ref);
+          if (bodyAttempted.has(key)) continue;
+          bodyAttempted.add(key);
+          if (myToken !== token) return false;
+          const existing = (await stored()).bodies[key];
+          if (existing?.text !== undefined) continue;
+          let entry: BodyEntry;
+          try {
+            const text = await repo.readText(ref);
+            entry = {
+              text,
+              identity: await hash(text),
+              status:
+                tab.content?.status === "truncated" ? "truncated" : "loaded",
+            };
+          } catch (error) {
+            entry = { status: "missing", reason: errorInfo(error).error };
           }
-        });
-      }
-      try {
-        const raw = await repo.readSnapshot(
-          source.deviceId,
-          source.kind,
-          source.historyId,
-        );
-        const snapshot = cleanSnapshot(raw, settings);
-        const tabs = snapshot.windows.reduce(
-          (sum, window) => sum + window.tabs.length,
-          0,
-        );
-        const bytes = new TextEncoder().encode(
-          JSON.stringify(snapshot),
-        ).byteLength;
-        const fits =
-          loadedTabs + tabs <= SEARCH_LIMITS.tabs &&
-          snapshotBytes + bytes <= SEARCH_LIMITS.bytes - 500_000;
-        if (
-          !(await commit(myToken, expectedFingerprint, (cache) => {
-            const target = cache.sources.find((item) => item.id === source.id);
-            if (!target) return;
-            if (!fits) {
-              cache.truncated = true;
-              target.error = "此快照超过剩余搜索缓存容量，未加载。";
-              target.errorCode = "limit";
-              return;
-            }
-            Object.assign(target, {
-              snapshot,
-              status: "loaded",
-              loadedAt: time(),
-              capturedAt: snapshot.capturedAt,
-            });
-            delete target.error;
-            delete target.errorCode;
-          }))
-        )
-          return false;
-        if (fits) {
-          loadedSnapshots++;
-          loadedTabs += tabs;
-          snapshotBytes += bytes;
+          if (
+            !(await commit(myToken, expected, (cache) => {
+              if (
+                bytes({ ...cache, bodies: { ...cache.bodies, [key]: entry } }) >
+                SEARCH_LIMITS.bytes
+              ) {
+                cache.truncated = true;
+                cache.bodies[key] = {
+                  status: "truncated",
+                  reason: "正文未载入：达到本地缓存预算。",
+                };
+              } else cache.bodies[key] = entry;
+            }))
+          )
+            return false;
         }
+      return true;
+    };
+    const fetchSource = async (
+      device: { deviceId: string; name: string },
+      kind: SearchSource["kind"],
+      historyId?: string,
+    ): Promise<boolean> => {
+      if (myToken !== token) return false;
+      const descriptor = { deviceId: device.deviceId, kind, historyId },
+        before = await stored(),
+        old = before.sources.find(
+          (source) => keyOf(source) === keyOf(descriptor),
+        );
+      let candidate: SearchSource;
+      try {
+        const snapshot =
+          kind === "history" && old?.snapshot
+            ? old.snapshot
+            : cleanSnapshot(
+                await repo.readSnapshot(device.deviceId, kind, historyId),
+                settings,
+              );
+        candidate = {
+          ...descriptor,
+          id: newSourceId(epoch, descriptor),
+          deviceName: device.name,
+          status: "loaded",
+          snapshot,
+          capturedAt: snapshot.capturedAt,
+          loadedAt: kind === "history" && old?.loadedAt ? old.loadedAt : now(),
+          stale: false,
+        };
+      } catch (error) {
+        candidate = {
+          ...descriptor,
+          id: newSourceId(epoch, descriptor),
+          deviceName: device.name,
+          status: old?.snapshot ? "loaded" : "failed",
+          snapshot: old?.snapshot,
+          capturedAt: old?.capturedAt,
+          loadedAt: old?.loadedAt,
+          stale: true,
+          ...errorInfo(error),
+        };
+      }
+      let accepted = false;
+      if (
+        !(await commit(myToken, expected, (cache) => {
+          if (candidate.snapshot && !sourceBudget(cache, candidate)) {
+            cache.truncated = true;
+            upsert(
+              cache,
+              old
+                ? {
+                    ...old,
+                    stale: true,
+                    error: "快照超过本地搜索缓存预算，保留旧版本。",
+                    errorCode: "limit",
+                  }
+                : {
+                    ...candidate,
+                    snapshot: undefined,
+                    status: "not-loaded",
+                    error: "快照超过本地搜索缓存预算。",
+                    errorCode: "limit",
+                  },
+            );
+          } else {
+            upsert(cache, candidate);
+            accepted = !!candidate.snapshot;
+          }
+        }))
+      )
+        return false;
+      return !accepted || !candidate.snapshot
+        ? myToken === token
+        : loadBodies(candidate.snapshot);
+    };
+    for (const device of devices)
+      if (!(await fetchSource(device, "current"))) return;
+    for (const device of devices) {
+      if (!(await fetchSource(device, "recovery"))) return;
+      let history: string[];
+      try {
+        history = await repo.listHistory(device.deviceId);
       } catch (error) {
         if (
-          !(await commit(myToken, expectedFingerprint, (cache) => {
-            const target = cache.sources.find((item) => item.id === source.id);
-            if (target)
-              Object.assign(target, { status: "failed", ...errorInfo(error) });
+          !(await commit(myToken, expected, (cache) => {
+            const old = cache.sources.filter(
+              (source) =>
+                source.deviceId === device.deviceId &&
+                source.kind === "history",
+            );
+            for (const source of old) {
+              source.stale = true;
+              Object.assign(source, errorInfo(error));
+            }
+            if (!old.length)
+              upsert(cache, {
+                id: newSourceId(epoch, {
+                  deviceId: device.deviceId,
+                  kind: "history",
+                  historyId: "discovery",
+                }),
+                deviceId: device.deviceId,
+                deviceName: device.name,
+                kind: "history",
+                historyId: "discovery",
+                status: "failed",
+                ...errorInfo(error),
+              });
           }))
         )
-          return false;
+          return;
+        continue;
       }
-      return myToken === token;
-    };
-    // Current snapshots are prioritized so one device's long history cannot hide peers.
-    for (const device of devices) {
       if (
-        !(await fetchSource({
-          id: sourceId(device.deviceId, "current"),
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          kind: "current",
-          status: "not-loaded",
+        !(await commit(myToken, expected, (cache) => {
+          const retained = new Set(history);
+          cache.sources = cache.sources.filter(
+            (source) =>
+              source.deviceId !== device.deviceId ||
+              source.kind !== "history" ||
+              (!!source.historyId && retained.has(source.historyId)),
+          );
+        }))
+      )
+        return;
+      const available = Math.max(
+        0,
+        SEARCH_LIMITS.sources -
+          (await stored()).sources.filter(
+            (source) =>
+              source.deviceId !== device.deviceId || source.kind !== "history",
+          ).length,
+      );
+      for (const historyId of history.slice(0, available))
+        if (!(await fetchSource(device, "history", historyId))) return;
+      if (
+        history.length > available &&
+        !(await commit(myToken, expected, (cache) => {
+          cache.truncated = true;
+          cache.error = "部分保留版本超过来源上限，覆盖不完整。";
         }))
       )
         return;
     }
-    const currentCache = await stored();
-    if (currentCache.includeHistory)
-      for (const device of devices) {
-        if (myToken !== token) return;
-        const recovery: SearchSource = {
-          id: sourceId(device.deviceId, "recovery"),
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          kind: "recovery",
-          status: "not-loaded",
-        };
-        const discoveryId = sourceId(device.deviceId, "history", "discovery");
-        if (
-          !(await commit(myToken, expectedFingerprint, (cache) => {
-            cache.sources.push(recovery);
-          }))
-        )
-          return;
-        if (!(await fetchSource(recovery))) return;
-        let history: string[];
-        try {
-          history = await repo.listHistory(device.deviceId);
-        } catch (error) {
-          if (
-            !(await commit(myToken, expectedFingerprint, (cache) => {
-              cache.sources.push({
-                id: discoveryId,
-                deviceId: device.deviceId,
-                deviceName: device.name,
-                kind: "history",
-                status: "failed",
-                ...errorInfo(error),
-              });
-            }))
-          )
-            return;
-          continue;
-        }
-        let sources: SearchSource[] = [];
-        if (
-          !(await commit(myToken, expectedFingerprint, (cache) => {
-            const available = Math.max(
-              0,
-              SEARCH_LIMITS.sources -
-                cache.sources.length -
-                devices.length * 2 -
-                1,
-            );
-            sources = history.slice(0, available).map((historyId) => ({
-              id: sourceId(device.deviceId, "history", historyId),
-              deviceId: device.deviceId,
-              deviceName: device.name,
-              kind: "history",
-              historyId,
-              status: "not-loaded",
-            }));
-            cache.sources.push(...sources);
-            if (history.length > available) {
-              cache.truncated = true;
-              cache.sources.push({
-                id: discoveryId,
-                deviceId: device.deviceId,
-                deviceName: device.name,
-                kind: "history",
-                status: "not-loaded",
-                error: `还有 ${history.length - available} 个保留版本超过来源列表上限，未加载。`,
-                errorCode: "limit",
-              });
-            }
-          }))
-        )
-          return;
-        for (const source of sources) if (!(await fetchSource(source))) return;
-      }
-    await commit(myToken, expectedFingerprint, (cache) => {
+    await commit(myToken, expected, (cache) => {
+      const used = new Set(
+        cache.sources.flatMap(
+          (source) =>
+            source.snapshot?.windows.flatMap((window) =>
+              window.tabs.flatMap((tab) =>
+                tab.content?.ref ? [bodyKey(tab.content.ref)] : [],
+              ),
+            ) ?? [],
+        ),
+      );
+      cache.bodies = Object.fromEntries(
+        Object.entries(cache.bodies).filter(([key]) => used.has(key)),
+      );
       cache.loading = false;
-      if (exhausted)
-        for (const source of cache.sources) {
-          if (source.status === "not-loaded" && !source.errorCode) {
-            source.error = "达到本地搜索缓存安全上限，未加载此来源。";
-            source.errorCode = "limit";
-          }
-        }
+      cache.refreshedAt = now();
     });
   } catch (error) {
-    await commit(myToken, expectedFingerprint, (cache) => {
+    await commit(myToken, expected, (cache) => {
       cache.loading = false;
       cache.error = errorInfo(error).error;
+      for (const source of cache.sources) {
+        source.stale = true;
+        source.error = source.error ?? cache.error;
+      }
+      cache.refreshedAt = now();
     });
   } finally {
     if (myToken === token) running = false;
   }
 }
-function occurrences(cache: StoredCache): SearchResult[] {
-  const results: SearchResult[] = [];
+function occurrences(cache: StoredCache): InternalResult[] {
+  const results: InternalResult[] = [];
   for (const source of cache.sources) {
-    if (source.status !== "loaded" || !source.snapshot) continue;
+    if (!source.snapshot) continue;
     for (const window of source.snapshot.windows)
       for (const tab of window.tabs) {
         const group = window.groups.find(
-          (item) => item.groupKey === tab.groupKey,
-        );
+            (item) => item.groupKey === tab.groupKey,
+          ),
+          ref = tab.content?.ref,
+          body = ref ? cache.bodies[bodyKey(ref)] : undefined;
         results.push({
           id: JSON.stringify([source.id, window.windowKey, tab.tabKey]),
           sourceId: source.id,
@@ -586,16 +836,36 @@ function occurrences(cache: StoredCache): SearchResult[] {
           groupKey: tab.groupKey,
           groupTitle: group?.title,
           stale:
+            !!source.stale ||
             source.kind !== "current" ||
-            Date.now() - Date.parse(source.snapshot.capturedAt) > 5 * 60_000,
+            Date.now() - Date.parse(source.snapshot.capturedAt) > FRESH_MS,
+          bodyText: body?.text,
+          bodyIdentity:
+            body?.identity ??
+            (ref
+              ? bodyKey(ref)
+              : `status:${tab.content?.status ?? "unavailable"}`),
+          contentStatus:
+            body?.text !== undefined
+              ? tab.content?.status
+              : tab.content?.status === "available" ||
+                  tab.content?.status === "truncated"
+                ? body?.status === "truncated"
+                  ? "truncated"
+                  : "unavailable"
+                : (tab.content?.status ?? "unavailable"),
+          contentReason:
+            body?.reason ??
+            tab.content?.reason ??
+            (!tab.content ? "旧快照或此标签没有采集正文。" : undefined),
         });
       }
   }
   return results;
 }
-const normalize = (value: string): string =>
+const normalize = (value: string) =>
   value.normalize("NFKC").toLocaleLowerCase();
-function filterResult(result: SearchResult, filters: SearchFilters): boolean {
+function filterResult(result: SearchResult, filters: SearchFilters) {
   if (filters.deviceId && result.deviceId !== filters.deviceId) return false;
   if (
     filters.kind &&
@@ -628,11 +898,28 @@ function filterResult(result: SearchResult, filters: SearchFilters): boolean {
     return false;
   return true;
 }
+function visibleResult(result: InternalResult, needle = ""): SearchResult {
+  const { bodyText, bodyIdentity: _identity, ...visible } = result;
+  if (bodyText !== undefined) {
+    const position = needle ? normalize(bodyText).indexOf(needle) : -1;
+    const start = Math.max(0, (position < 0 ? 0 : position) - 60);
+    visible.bodySnippet =
+      (start ? "…" : "") +
+      bodyText.slice(start, start + 220) +
+      (bodyText.length > start + 220 ? "…" : "");
+  }
+  return visible;
+}
 export async function querySearch(
   query: string,
   filters: SearchFilters = {},
   limit = 100,
-): Promise<{ results: SearchResult[]; total: number; coverage: SearchCache }> {
+): Promise<{
+  results: SearchResult[];
+  total: number;
+  occurrenceTotal: number;
+  coverage: SearchCache;
+}> {
   if (typeof query !== "string" || query.length > 2000)
     throw Error("搜索词最长为 2000 个字符。");
   for (const date of [filters.after, filters.before])
@@ -649,13 +936,12 @@ export async function querySearch(
           result.url,
           result.domain,
           result.groupTitle ?? "",
+          result.bodyText ?? "",
         ].map(normalize);
-        const exact = needle !== "" && fields.some((field) => field === needle);
         return {
           result,
-          rank: exact ? 0 : 1,
-          matches:
-            needle === "" || fields.some((field) => field.includes(needle)),
+          rank: needle && fields.some((field) => field === needle) ? 0 : 1,
+          matches: !needle || fields.some((field) => field.includes(needle)),
         };
       })
       .filter((item) => item.matches)
@@ -665,12 +951,27 @@ export async function querySearch(
           Date.parse(b.result.capturedAt) - Date.parse(a.result.capturedAt) ||
           a.result.id.localeCompare(b.result.id),
       );
+    const grouped = new Map<string, SearchResult>();
+    for (const { result } of scored) {
+      const identity = JSON.stringify([
+          result.url,
+          result.title,
+          result.bodyIdentity,
+          result.groupTitle ?? "",
+          result.pinned,
+        ]),
+        leaf = visibleResult(result, needle),
+        row = grouped.get(identity);
+      if (row) row.occurrences!.push(leaf);
+      else grouped.set(identity, { ...leaf, occurrences: [leaf] });
+    }
     const count = Number.isFinite(limit)
       ? Math.max(1, Math.min(1000, Math.trunc(limit)))
       : 100;
     return {
-      results: scored.slice(0, count).map((item) => item.result),
-      total: scored.length,
+      results: [...grouped.values()].slice(0, count),
+      total: grouped.size,
+      occurrenceTotal: scored.length,
       coverage: publicCache(cache),
     };
   });
@@ -679,8 +980,7 @@ export async function getSearchSource(id: string): Promise<SearchSource> {
   return serial(async () => {
     const cache = await checkedCache(),
       source = cache.sources.find((item) => item.id === id);
-    if (!source || source.status !== "loaded" || !source.snapshot)
-      throw Error("此搜索来源尚未加载或已失效，请重新加载。");
+    if (!source?.snapshot) throw Error("搜索来源已失效，请重新搜索。");
     return structuredClone(source);
   });
 }
@@ -688,7 +988,7 @@ export async function getSearchResult(id: string): Promise<SearchResult> {
   return serial(async () => {
     const cache = await checkedCache(),
       result = occurrences(cache).find((item) => item.id === id);
-    if (!result) throw Error("此搜索结果已失效，请重新搜索。");
-    return structuredClone(result);
+    if (!result) throw Error("搜索结果已失效，请重新搜索。");
+    return visibleResult(result);
   });
 }

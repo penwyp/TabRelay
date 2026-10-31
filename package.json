@@ -1,6 +1,6 @@
 {
   "name": "tabrelay",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
   "devDependencies": {
     "@types/chrome": "^0.1.24",
     "esbuild": "^0.28.2",
+    "fake-indexeddb": "^6.2.7",
     "playwright": "^1.56.1",
     "prettier": "^3.9.10",
     "typescript": "^5.9.3",
