@@ -403,4 +403,64 @@ describe("WebDAV publication and failure behavior", () => {
       new WebDAVRepository(settings).readSnapshot("device-A"),
     ).rejects.toMatchObject({ code: "encryption" });
   });
+  it.each(["recovery.json", "device.json"])(
+    "does not overwrite a newer writer's %s after auxiliary GET",
+    async (target) => {
+      const server = dav();
+      const repo = new WebDAVRepository(settings);
+      const first = await repo.publish(snapshot(), device);
+      const original = server.fetchMock.getMockImplementation()!;
+      const base = settings.endpoint + "tabrelay/v1/devices/device-A/";
+      let injected = false;
+      server.fetchMock.mockImplementation(async (url, init) => {
+        if (
+          !injected &&
+          String(url) === base + target &&
+          init?.method === "GET"
+        ) {
+          injected = true;
+          server.files.set(base + "current.json", {
+            body: JSON.stringify(snapshot(3)),
+            etag: '\"new-current\"',
+          });
+          server.files.set(base + target, {
+            body: JSON.stringify(
+              target === "recovery.json"
+                ? snapshot(3)
+                : {
+                    ...device,
+                    name: "New writer",
+                    updatedAt: "2026-10-31T11:00:00Z",
+                  },
+            ),
+            etag: '\"new-auxiliary\"',
+          });
+        }
+        return original(url, init);
+      });
+      await expect(
+        repo.publish(snapshot(2), device, first.etag),
+      ).rejects.toMatchObject({ code: "conflict" });
+      expect(injected).toBe(true);
+      expect(server.files.get(base + target)?.etag).toBe('\"new-auxiliary\"');
+      expect(
+        JSON.parse(server.files.get(base + "current.json")!.body).revision,
+      ).toBe(3);
+    },
+  );
+  it("rejects a newer recovery revision even if current was externally rolled back", async () => {
+    const server = dav();
+    const repo = new WebDAVRepository(settings);
+    const first = await repo.publish(snapshot(), device);
+    const path =
+      settings.endpoint + "tabrelay/v1/devices/device-A/recovery.json";
+    server.files.set(path, {
+      body: JSON.stringify(snapshot(9)),
+      etag: '\"new-recovery\"',
+    });
+    await expect(
+      repo.publish(snapshot(2), device, first.etag),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(JSON.parse(server.files.get(path)!.body).revision).toBe(9);
+  });
 });

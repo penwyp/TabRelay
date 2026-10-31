@@ -593,20 +593,39 @@ export class WebDAVRepository {
       );
     if (!strongETag(etag))
       fail("etag-required", "服务器没有返回可用于安全条件写入的强 ETag。");
-    // Verify ownership again before auxiliary metadata. Each auxiliary write is also CAS.
-    const latest = await this.current(snapshot.deviceId);
-    if (
-      !latest ||
-      latest.etag !== etag ||
-      JSON.stringify(latest.snapshot) !== JSON.stringify(snapshot)
-    )
-      fail("conflict", "发布期间检测到另一写入者，已暂停同步。");
+    // These files are not a multi-resource transaction. Read auxiliary state first,
+    // then recheck the authoritative current pointer before each conditional write.
+    // Otherwise a stale writer could GET a newer recovery/device ETag and use that
+    // fresh ETag to overwrite the newer data with its own older snapshot.
+    const assertCurrentOwnership = async (): Promise<void> => {
+      const latest = await this.current(snapshot.deviceId);
+      if (
+        !latest ||
+        latest.etag !== etag ||
+        JSON.stringify(latest.snapshot) !== JSON.stringify(snapshot)
+      )
+        fail("conflict", "发布期间检测到另一写入者，已暂停同步。");
+    };
+    await assertCurrentOwnership();
     if (snapshot.windows.some((window) => window.tabs.length > 0)) {
       const recovery = await this.request(`${base}recovery.json`, "GET", {
         allowed: [200, 404],
       });
-      if (recovery.status === 200 && !strongETag(recovery.etag))
-        fail("etag-required", "恢复点缺少强 ETag，已拒绝不安全覆盖。");
+      if (recovery.status === 200) {
+        if (!strongETag(recovery.etag))
+          fail("etag-required", "恢复点缺少强 ETag，已拒绝不安全覆盖。");
+        const priorRecovery = await this.decode(
+          recovery.text,
+          snapshot.deviceId,
+        );
+        if (
+          priorRecovery.revision > snapshot.revision ||
+          (priorRecovery.revision === snapshot.revision &&
+            JSON.stringify(priorRecovery) !== JSON.stringify(snapshot))
+        )
+          fail("conflict", "恢复点包含更新或冲突的版本，已拒绝覆盖。");
+      }
+      await assertCurrentOwnership();
       await this.verifiedPut(
         `${base}recovery.json`,
         stableBody,
@@ -621,6 +640,7 @@ export class WebDAVRepository {
     });
     if (metadata.status === 200 && !strongETag(metadata.etag))
       fail("etag-required", "设备信息缺少强 ETag，已拒绝不安全覆盖。");
+    await assertCurrentOwnership();
     await this.verifiedPut(
       `${base}device.json`,
       JSON.stringify(device),
@@ -644,6 +664,7 @@ export class WebDAVRepository {
           allowed: [200, 204, 404],
         });
     }
+    await assertCurrentOwnership();
     return { etag };
   }
 }

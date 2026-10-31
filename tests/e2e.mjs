@@ -147,8 +147,8 @@ async function synced(b) {
 const current = (id) =>
   JSON.parse(dav.files.get(`/dav/tabrelay/v1/devices/${id}/current.json`));
 try {
-  const a = await browser("A"),
-    b = await browser("B");
+  const a = await browser("A");
+  let b = await browser("B");
   await populate(a, [
     ["AI-Research", "Agent-Architecture", "Resource-Cost"],
     ["Weekend-Cycling", "Route-Plan"],
@@ -256,6 +256,8 @@ try {
     assert.equal(JSON.stringify(current(sa.deviceId)), originalSource);
   });
   await b.page.reload();
+  await synced(b);
+  await delay(2200);
   await eventually(() =>
     b.page
       .locator("#operation-title")
@@ -348,6 +350,133 @@ try {
       assert.ok(await b.worker.evaluate((id) => chrome.windows.get(id), id));
   });
   await synced(b);
+  await test("Concurrent user tab changes are reflected in the merged snapshot", async () => {
+    const snap = structuredClone(source);
+    snap.snapshotId = "user-change-test";
+    snap.windows = [
+      {
+        windowKey: "user-change-window",
+        order: 0,
+        groups: [],
+        tabs: Array.from({ length: 20 }, (_, i) => ({
+          tabKey: "user-change-" + i,
+          url: dav.origin + "/fixture/user-change-" + i,
+          title: "User change " + i,
+          index: i,
+          pinned: false,
+          origin: {
+            deviceId: "user-change-device",
+            tabKey: "user-change-" + i,
+          },
+        })),
+      },
+    ];
+    const plan = await b.call({ type: "PLAN_RESTORE", snapshot: snap });
+    await b.call({ type: "START_RESTORE", planId: plan.id });
+    await eventually(async () => {
+      const s = await b.call({ type: "GET_STATE" });
+      return s.operation.createdTabs.length >= 2;
+    });
+    await b.page.evaluate(async (origin) => {
+      const tabs = await chrome.tabs.query({});
+      const close = tabs.find((t) => t.url?.endsWith("/Original-Notes"));
+      if (close) await chrome.tabs.remove(close.id);
+      const edit = tabs.find((t) => t.url?.endsWith("/Original-Work"));
+      if (edit)
+        await chrome.tabs.update(edit.id, {
+          url: origin + "/fixture/User-Edited-Work",
+        });
+    }, dav.origin);
+    await eventually(async () => {
+      const s = await b.call({ type: "GET_STATE" });
+      return s.operation.status === "COMPLETED";
+    });
+    await synced(b);
+    const urls = current(sb.deviceId).windows.flatMap((w) =>
+      w.tabs.map((t) => t.url),
+    );
+    assert.ok(!urls.some((u) => u.endsWith("/Original-Notes")));
+    assert.ok(urls.some((u) => u.endsWith("/User-Edited-Work")));
+  });
+  let interruptedSession;
+  await test("Real MV3 worker termination preserves journal and does not replay uncertain work", async () => {
+    const snap = structuredClone(source);
+    snap.snapshotId = "worker-restart-test";
+    snap.windows = [
+      {
+        windowKey: "worker-restart-window",
+        order: 0,
+        groups: [],
+        tabs: Array.from({ length: 60 }, (_, i) => ({
+          tabKey: "worker-restart-" + i,
+          url: dav.origin + "/fixture/worker-restart-" + i,
+          title: "Worker restart " + i,
+          index: i,
+          pinned: false,
+          origin: {
+            deviceId: "worker-restart-device",
+            tabKey: "worker-restart-" + i,
+          },
+        })),
+      },
+    ];
+    const originalTabs = await b.page.evaluate(async () =>
+      (await chrome.tabs.query({})).map((t) => ({ id: t.id, url: t.url })),
+    );
+    const plan = await b.call({ type: "PLAN_RESTORE", snapshot: snap });
+    await b.call({ type: "START_RESTORE", planId: plan.id });
+    await eventually(async () => {
+      const s = await b.call({ type: "GET_STATE" });
+      return s.operation.createdTabs.length >= 2;
+    });
+    const cdp = await b.context.newCDPSession(b.page);
+    await cdp.send("ServiceWorker.enable");
+    await cdp.send("ServiceWorker.stopAllWorkers");
+    const state = await eventually(async () => {
+      const s = await b.call({ type: "GET_STATE" });
+      return s.operation.status === "INTERRUPTED" ? s : false;
+    });
+    assert.ok(state.operation.createdTabs.length < 60);
+    const count = await b.page.evaluate(
+      async () => (await chrome.tabs.query({})).length,
+    );
+    await delay(500);
+    assert.equal(
+      await b.page.evaluate(async () => (await chrome.tabs.query({})).length),
+      count,
+    );
+    const currentTabs = await b.page.evaluate(() => chrome.tabs.query({}));
+    for (const t of originalTabs)
+      assert.ok(currentTabs.some((x) => x.id === t.id && x.url === t.url));
+    if (state.operation.uncertain)
+      await assert.rejects(() => b.call({ type: "RESUME_RESTORE" }));
+    interruptedSession = await b.page.evaluate(
+      async () =>
+        (await chrome.storage.local.get("state")).state.identities
+          .browserSession,
+    );
+    await cdp.detach();
+  });
+  await test("Full profile restart retains UUID and refuses stale-runtime undo", async () => {
+    const oldId = (await b.call({ type: "GET_STATE" })).deviceId;
+    await b.context.close();
+    b = await browser("B");
+    assert.equal((await b.call({ type: "GET_STATE" })).deviceId, oldId);
+    await eventually(() =>
+      b.page.evaluate(
+        async (old) =>
+          (await chrome.storage.local.get("state")).state.identities
+            .browserSession !== old,
+        interruptedSession,
+      ),
+    );
+    await assert.rejects(() =>
+      b.call({ type: "UNDO_RESTORE", confirmed: true }),
+    );
+    await assert.rejects(() => b.call({ type: "RESUME_RESTORE" }));
+    await b.call({ type: "CANCEL_RESTORE" });
+    await synced(b);
+  });
   await test("Empty current leaves last nonempty recovery intact", async () => {
     const before = dav.files.get(
       `/dav/tabrelay/v1/devices/${sb.deviceId}/recovery.json`,

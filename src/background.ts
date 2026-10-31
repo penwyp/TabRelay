@@ -244,7 +244,12 @@ async function handleInner(m: any) {
       return (await load()).operation;
     case "RESUME_RESTORE": {
       const op = (await load()).operation;
-      if (!op || op.status !== "INTERRUPTED" || op.uncertain)
+      if (
+        !op ||
+        op.status !== "INTERRUPTED" ||
+        op.uncertain ||
+        op.browserSession !== (await load()).identities.browserSession
+      )
         throw Error("无法安全继续，请保留当前结果并取消任务后检查。");
       void execute()
         .then(() => sync(true))
