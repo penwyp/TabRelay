@@ -40,4 +40,10 @@ document.getElementById("open-settings")!.addEventListener("click", () => {
   void chrome.runtime.openOptionsPage().then(() => window.close());
 });
 
+document.getElementById("open-search")!.addEventListener("click", () => {
+  void chrome.tabs
+    .create({ url: chrome.runtime.getURL("search.html") })
+    .then(() => window.close());
+});
+
 export {};

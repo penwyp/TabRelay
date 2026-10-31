@@ -681,3 +681,7 @@ setInterval(() => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void refreshState();
 });
+
+$("search-open").addEventListener("click", () => {
+  void chrome.tabs.create({ url: chrome.runtime.getURL("search.html") });
+});

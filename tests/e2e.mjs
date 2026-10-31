@@ -116,14 +116,14 @@ async function populate(b, windows) {
     { windows, origin: dav.origin },
   );
 }
-async function configured(b, name) {
+async function configured(b, name, endpoint = dav.endpoint) {
   let s = await b.call({ type: "GET_STATE" });
   await b.call({
     type: "SAVE_SETTINGS",
     settings: {
       ...s.settings,
-      endpoint: dav.endpoint,
-      httpAcknowledgedOrigin: dav.origin,
+      endpoint,
+      httpAcknowledgedOrigin: new URL(endpoint).origin,
       deviceName: name,
       enabled: true,
       historyLimit: 5,
@@ -148,6 +148,151 @@ async function synced(b) {
 }
 const current = (id) =>
   JSON.parse(dav.files.get(`/dav/tabrelay/v1/devices/${id}/current.json`));
+
+/** Curated labeled corpus. It tests these exact examples, not universal retrieval quality. */
+function seedSearchFixture() {
+  const endpoint = dav.origin + "/dav/search-fixture/";
+  const rootPath = "/dav/search-fixture/tabrelay/v1/";
+  const deviceId = "remote-search-device";
+  const devicePath = rootPath + "devices/" + deviceId + "/";
+  for (const dir of [
+    "/dav/search-fixture/",
+    rootPath,
+    rootPath + "devices/",
+    devicePath,
+    devicePath + "history/",
+  ])
+    dav.dirs.add(dir);
+  const tab = (
+    tabKey,
+    title,
+    suffix,
+    index,
+    groupKey,
+    originDevice = deviceId,
+  ) => ({
+    tabKey,
+    title,
+    url: dav.origin + "/fixture/" + suffix,
+    index,
+    pinned: false,
+    ...(groupKey ? { groupKey } : {}),
+    origin: { deviceId: originDevice, tabKey },
+  });
+  const make = (snapshotId, revision, windows) => ({
+    schemaVersion: 1,
+    deviceId,
+    snapshotId,
+    revision,
+    capturedAt: "2026-10-31T16:00:00Z",
+    windows,
+  });
+  const currentSnapshot = make("search-current", 2, [
+    {
+      windowKey: "search-current-window",
+      order: 0,
+      activeTabKey: "search-k8s",
+      groups: [
+        {
+          groupKey: "engineering",
+          title: "平台工程",
+          color: "green",
+          collapsed: false,
+        },
+      ],
+      tabs: [
+        tab(
+          "search-k8s",
+          "Kubernetes 调度实战",
+          "kubernetes-scheduler",
+          0,
+          "engineering",
+        ),
+        tab(
+          "search-duplicate-a",
+          "重复标签 同一网址",
+          "same-url",
+          1,
+          undefined,
+          "origin-first",
+        ),
+        tab(
+          "search-duplicate-b",
+          "重复标签 同一网址",
+          "same-url",
+          2,
+          undefined,
+          "origin-second",
+        ),
+      ],
+    },
+  ]);
+  const historical = make("search-history", 1, [
+    {
+      windowKey: "cost-window",
+      order: 0,
+      activeTabKey: "search-budget",
+      groups: [
+        {
+          groupKey: "cost-group",
+          title: "资源治理",
+          color: "blue",
+          collapsed: false,
+        },
+      ],
+      tabs: [
+        tab(
+          "search-budget",
+          "资源成本治理 GPU 预算",
+          "gpu-budget-2026",
+          0,
+          "cost-group",
+        ),
+        tab(
+          "search-finops",
+          "FinOps 成本日报",
+          "finops-daily",
+          1,
+          "cost-group",
+        ),
+        tab("search-reference", "容量模型参考", "capacity-model", 2),
+      ],
+    },
+    {
+      windowKey: "travel-window",
+      order: 1,
+      groups: [],
+      tabs: [tab("search-trip", "周末骑行路线", "cycling-route", 0)],
+    },
+  ]);
+  const recovery = make("search-empty-recovery", 0, []);
+  dav.files.set(
+    devicePath + "device.json",
+    JSON.stringify({
+      deviceId,
+      name: "研究电脑 · 远端",
+      version: "1.2.0",
+      updatedAt: "2026-10-31T16:00:00Z",
+      windows: 1,
+      tabs: 3,
+    }),
+  );
+  dav.files.set(devicePath + "current.json", JSON.stringify(currentSnapshot));
+  dav.files.set(devicePath + "recovery.json", JSON.stringify(recovery));
+  const historyId = "000000000001-search-history.json";
+  dav.files.set(
+    devicePath + "history/" + historyId,
+    JSON.stringify(historical),
+  );
+  return {
+    endpoint,
+    deviceId,
+    devicePath,
+    currentSnapshot,
+    historical,
+    historyId,
+  };
+}
 try {
   const a = await browser("A");
   let b = await browser("B");
@@ -720,6 +865,325 @@ try {
       return s.sync.pausedConflict;
     });
     assert.equal(current(sa.deviceId).snapshotId, "other-writer");
+  });
+  const searchFixture = seedSearchFixture();
+  const d = await browser("D-search");
+  const localSearchPage = await d.context.newPage();
+  await localSearchPage.goto(dav.origin + "/fixture/search-local");
+  await localSearchPage.evaluate(() => {
+    document.title = "本地 SRE 值班手册";
+  });
+  const sd = await configured(d, "搜索验证设备", searchFixture.endpoint);
+  let searchPage;
+  const querySearch = (query, filters = {}, limit = 100) =>
+    d.call({ type: "SEARCH_QUERY", query, filters, limit });
+  const waitSearch = (afterGeneration = -1) =>
+    eventually(async () => {
+      const status = await d.call({ type: "SEARCH_STATUS" });
+      return !status.loading &&
+        status.updatedAt &&
+        status.generation > afterGeneration
+        ? status
+        : false;
+    });
+  let historicalHit;
+  await test("Search opens in full tab and distinguishes unrequested history from loaded data", async () => {
+    const opened = d.context.waitForEvent("page");
+    await d.page.locator("#search-open").click();
+    searchPage = await opened;
+    await searchPage.waitForURL(`chrome-extension://${d.id}/search.html`);
+    await searchPage.locator("#load-snapshots").waitFor();
+    const initial = await d.call({ type: "SEARCH_STATUS" });
+    assert.equal(initial.sources.length, 0);
+    assert.equal(initial.updatedAt, undefined);
+    await searchPage.locator("#load-snapshots").click();
+    const loaded = await waitSearch(initial.generation);
+    assert.ok(
+      loaded.sources.some(
+        (source) => source.kind === "current" && source.status === "loaded",
+      ),
+    );
+    assert.ok(
+      loaded.sources.some(
+        (source) => source.kind === "history" && source.status === "not-loaded",
+      ),
+    );
+    assert.equal((await querySearch("资源成本治理")).total, 0);
+    await searchPage.locator("#include-history").check();
+    await searchPage.locator("#load-snapshots").click();
+    const complete = await waitSearch(loaded.generation);
+    assert.ok(
+      complete.sources.some(
+        (source) =>
+          source.deviceId === searchFixture.deviceId &&
+          source.kind === "recovery" &&
+          source.status === "loaded",
+      ),
+    );
+    assert.ok(
+      complete.sources.some(
+        (source) =>
+          source.deviceId === searchFixture.deviceId &&
+          source.kind === "history" &&
+          source.status === "loaded",
+      ),
+    );
+    historicalHit = (await querySearch("资源成本治理")).results[0];
+    assert.equal(historicalHit.tabKey, "search-budget");
+    assert.equal(historicalHit.kind, "history");
+    assert.equal(historicalHit.stale, true);
+  });
+  await test("Curated Chinese mixed-language title URL and group queries preserve provenance", async () => {
+    const labels = [
+      { query: "资源成本治理", expected: ["search-budget"] },
+      { query: "gpu 预算", expected: ["search-budget"] },
+      { query: "FinOps 成本日报", expected: ["search-finops"] },
+      { query: "gpu-budget-2026", expected: ["search-budget"] },
+      { query: "资源治理", expected: ["search-budget", "search-finops"] },
+      { query: "KUBERNETES", expected: ["search-k8s"] },
+      { query: "周末骑行", expected: ["search-trip"] },
+    ];
+    const measurements = [];
+    for (const label of labels) {
+      const response = await querySearch(
+        label.query,
+        { deviceId: searchFixture.deviceId },
+        10,
+      );
+      const actual = response.results.map((result) => result.tabKey);
+      const hits = label.expected.filter((key) => actual.includes(key)).length;
+      const recallAt10 = hits / label.expected.length;
+      assert.equal(
+        recallAt10,
+        1,
+        label.query + " expected " + JSON.stringify(label.expected),
+      );
+      measurements.push({ ...label, returned: actual, recallAt10 });
+    }
+    const duplicate = await querySearch("same-url", {
+      deviceId: searchFixture.deviceId,
+      kind: "current",
+    });
+    assert.equal(duplicate.total, 2);
+    assert.deepEqual(
+      new Set(duplicate.results.map((result) => result.tabKey)),
+      new Set(["search-duplicate-a", "search-duplicate-b"]),
+    );
+    assert.equal(new Set(duplicate.results.map((result) => result.id)).size, 2);
+    const filtered = await querySearch(
+      "",
+      { deviceId: searchFixture.deviceId, kind: "history", group: "资源治理" },
+      1,
+    );
+    assert.equal(filtered.total, 2);
+    assert.equal(filtered.results.length, 1);
+    assert.equal(filtered.results[0].groupTitle, "资源治理");
+    await fs.writeFile(
+      "evidence/search-recall-fixture.json",
+      JSON.stringify(
+        {
+          scope:
+            "Seven explicit labeled queries over the deterministic test fixture only; not a universal search-quality estimate",
+          k: 10,
+          measurements,
+        },
+        null,
+        2,
+      ),
+    );
+    await searchPage.locator("#search-query").fill("资源治理");
+    await searchPage.locator("#search-submit").click();
+    await searchPage
+      .locator('.search-result[data-tab-key="search-budget"]')
+      .waitFor();
+    await searchPage.screenshot({
+      path: "evidence/screenshots/07-search-history-results.png",
+      fullPage: true,
+    });
+  });
+  await test("Historical search tab group and window plans require confirmation and preserve existing windows", async () => {
+    const before = await d.page.evaluate(() =>
+      chrome.windows.getAll({ populate: true }),
+    );
+    const tabPlan = await d.call({
+      type: "SEARCH_PLAN",
+      sourceId: historicalHit.sourceId,
+      tabKey: historicalHit.tabKey,
+    });
+    assert.equal(tabPlan.windows.length, 1);
+    assert.equal(tabPlan.windows[0].tabs.length, 1);
+    const groupPlan = await d.call({
+      type: "SEARCH_PLAN",
+      sourceId: historicalHit.sourceId,
+      groupKey: historicalHit.groupKey,
+    });
+    assert.equal(groupPlan.windows[0].tabs.length, 2);
+    const windowPlan = await d.call({
+      type: "SEARCH_PLAN",
+      sourceId: historicalHit.sourceId,
+      windowKey: historicalHit.windowKey,
+    });
+    assert.equal(windowPlan.windows[0].tabs.length, 3);
+    assert.equal(
+      (await d.page.evaluate(() => chrome.windows.getAll())).length,
+      before.length,
+    );
+    const card = searchPage
+      .locator('.search-result[data-tab-key="search-budget"]')
+      .first();
+    await card.locator('[data-action="restore-group"]').click();
+    await searchPage.locator("#search-restore-dialog[open]").waitFor();
+    assert.ok(
+      (
+        await searchPage.locator("#search-plan-existing").textContent()
+      ).includes(String(before.length)),
+    );
+    await searchPage.screenshot({
+      path: "evidence/screenshots/08-search-restore-preview.png",
+      fullPage: true,
+    });
+    await searchPage.locator("#search-confirm-restore").click();
+    const restored = await eventually(async () => {
+      const s = await d.call({ type: "GET_STATE" });
+      return s.operation?.status === "COMPLETED" ? s : false;
+    });
+    assert.equal(restored.operation.createdWindows.length, 1);
+    assert.equal(restored.operation.createdTabs.length, 2);
+    assert.deepEqual(restored.operation.failures, []);
+    const after = await d.page.evaluate(() =>
+      chrome.windows.getAll({ populate: true }),
+    );
+    assert.equal(after.length, before.length + 1);
+    for (const original of before)
+      assert.deepEqual(
+        after
+          .find((w) => w.id === original.id)
+          .tabs.map((t) => ({ id: t.id, url: t.url })),
+        original.tabs.map((t) => ({ id: t.id, url: t.url })),
+      );
+    await synced(d);
+    for (const action of [
+      { query: "容量模型参考", key: "search-reference", scope: "tab" },
+      { query: "周末骑行路线", key: "search-trip", scope: "window" },
+    ]) {
+      await searchPage.locator("#search-query").fill(action.query);
+      await searchPage.locator("#search-submit").click();
+      const result = searchPage
+        .locator(`.search-result[data-tab-key="${action.key}"]`)
+        .first();
+      await result.waitFor();
+      await result.locator(`[data-action="restore-${action.scope}"]`).click();
+      await searchPage.locator("#search-restore-dialog[open]").waitFor();
+      const priorOperation = (await d.call({ type: "GET_STATE" })).operation.id;
+      await searchPage.locator("#search-confirm-restore").click();
+      const additional = await eventually(async () => {
+        const state = await d.call({ type: "GET_STATE" });
+        return state.operation?.id !== priorOperation &&
+          state.operation?.status === "COMPLETED"
+          ? state
+          : false;
+      });
+      assert.equal(additional.operation.createdWindows.length, 1);
+      assert.equal(additional.operation.createdTabs.length, 1);
+      assert.deepEqual(additional.operation.failures, []);
+      await synced(d);
+    }
+    const finalWindows = await d.page.evaluate(() =>
+      chrome.windows.getAll({ populate: true }),
+    );
+    assert.equal(finalWindows.length, before.length + 3);
+    for (const original of before)
+      assert.deepEqual(
+        finalWindows
+          .find((w) => w.id === original.id)
+          .tabs.map((t) => ({ id: t.id, url: t.url })),
+        original.tabs.map((t) => ({ id: t.id, url: t.url })),
+      );
+    const settings = (await d.call({ type: "GET_STATE" })).settings;
+    await d.call({
+      type: "SAVE_SETTINGS",
+      settings: { ...settings, enabled: false },
+    });
+  });
+  await test("Search local locate verifies current identity and rejects a stale navigated result", async () => {
+    await d.call({ type: "SEARCH_LOAD", includeHistory: true });
+    await waitSearch();
+    const local = await querySearch("search-local", {
+      deviceId: sd.deviceId,
+      kind: "current",
+    });
+    assert.equal(local.total, 1);
+    const located = await d.call({
+      type: "SEARCH_LOCATE",
+      resultId: local.results[0].id,
+    });
+    const active = await d.page.evaluate(
+      async (id) => chrome.tabs.get(id),
+      located.tabId,
+    );
+    assert.equal(active.active, true);
+    assert.ok(active.url.endsWith("/search-local"));
+    await localSearchPage.goto(dav.origin + "/fixture/search-local-navigated");
+    await assert.rejects(() =>
+      d.call({ type: "SEARCH_LOCATE", resultId: local.results[0].id }),
+    );
+  });
+  await test("Search exposes failed sources and cancellation prevents late writes", async () => {
+    const currentKey = searchFixture.devicePath + "current.json";
+    const saved = dav.files.get(currentKey);
+    dav.files.delete(currentKey);
+    await d.call({ type: "SEARCH_LOAD", includeHistory: true });
+    const failed = await waitSearch();
+    assert.ok(
+      failed.sources.some(
+        (source) =>
+          source.deviceId === searchFixture.deviceId &&
+          source.kind === "current" &&
+          source.status === "failed",
+      ),
+    );
+    assert.ok(
+      failed.sources.some(
+        (source) =>
+          source.deviceId === searchFixture.deviceId &&
+          source.kind === "recovery" &&
+          source.status === "loaded",
+      ),
+    );
+    assert.ok((await querySearch("资源成本治理")).total >= 1);
+    dav.files.set(currentKey, saved);
+    dav.faults.delay = 450;
+    await d.call({ type: "SEARCH_LOAD", includeHistory: true });
+    await d.call({ type: "SEARCH_CANCEL" });
+    const cancelled = await d.call({ type: "SEARCH_STATUS" });
+    assert.equal(cancelled.cancelled, true);
+    assert.equal(cancelled.loading, false);
+    const preserved = JSON.stringify(cancelled.sources);
+    // Two device metadata reads plus the delayed directory read are bounded by 3 × 450 ms.
+    await delay(1800);
+    assert.equal(
+      JSON.stringify((await d.call({ type: "SEARCH_STATUS" })).sources),
+      preserved,
+    );
+    dav.faults.delay = 0;
+    await d.call({ type: "SEARCH_LOAD", includeHistory: true });
+    await waitSearch();
+    assert.ok((await querySearch("资源成本治理")).total >= 1);
+    let settings = (await d.call({ type: "GET_STATE" })).settings;
+    await d.call({
+      type: "SAVE_SETTINGS",
+      settings: { ...settings, enabled: false, blacklist: ["127.0.0.1"] },
+    });
+    const reset = await d.call({ type: "SEARCH_STATUS" });
+    assert.equal(reset.sources.length, 0);
+    assert.equal((await querySearch("资源成本治理")).total, 0);
+    await assert.rejects(() =>
+      d.call({
+        type: "SEARCH_PLAN",
+        sourceId: historicalHit.sourceId,
+        tabKey: historicalHit.tabKey,
+      }),
+    );
   });
   console.log(`All ${results.length} real-browser E2E scenarios passed.`);
 } catch (error) {

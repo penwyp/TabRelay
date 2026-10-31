@@ -1,6 +1,21 @@
+import {
+  searchStatus,
+  loadSearch,
+  cancelSearch,
+  clearSearch,
+  querySearch,
+  getSearchSource,
+  getSearchResult,
+} from "./search";
 import { load, update, dirty } from "./state";
 import { collect } from "./collector";
-import { checkSettings, hash, makePlan, validateSnapshot } from "./model";
+import {
+  checkSettings,
+  hash,
+  makePlan,
+  validateSnapshot,
+  safeUrl,
+} from "./model";
 import { WebDAVRepository } from "./webdav";
 import {
   prepare,
@@ -144,6 +159,11 @@ async function handle(m: any) {
     "START_RESTORE",
     "RESET_ID",
     "UNDO_RESTORE",
+    "SEARCH_PLAN",
+    "SEARCH_LOAD",
+    "SEARCH_CLEAR",
+    "SEARCH_CANCEL",
+    "SEARCH_LOCATE",
   ].includes(m?.type);
   if (exclusive && commandBusy) throw Error("另一操作正在处理，请稍后重试");
   if (exclusive) commandBusy = true;
@@ -197,6 +217,7 @@ async function handleInner(m: any) {
         s.sync.dirty = true;
         s.sync.generation++;
       });
+      await clearSearch();
       await chrome.storage.local.remove("restorePlan");
       return true;
     }
@@ -223,6 +244,87 @@ async function handleInner(m: any) {
       return new WebDAVRepository((await load()).settings).listHistory(
         m.deviceId,
       );
+    case "SEARCH_STATUS":
+      return searchStatus();
+    case "SEARCH_QUERY":
+      return querySearch(String(m.query || ""), m.filters || {}, m.limit || 50);
+    case "SEARCH_LOAD":
+      await chrome.storage.local.remove("restorePlan");
+      return loadSearch(m.includeHistory === true);
+    case "SEARCH_CANCEL":
+      await chrome.storage.local.remove("restorePlan");
+      return cancelSearch();
+    case "SEARCH_CLEAR":
+      await chrome.storage.local.remove("restorePlan");
+      return clearSearch();
+    case "SEARCH_LOCATE": {
+      const result = await getSearchResult(String(m.resultId));
+      const s = await load();
+      if (result.deviceId !== s.deviceId || result.kind !== "current")
+        throw Error("只有本机当前快照中的标签可以定位，请使用恢复预览。");
+      // Never reconstruct a runtime ID by URL alone. Require an existing current
+      // logical identity, then verify the live browser tab immediately before activation.
+      const candidates = Object.entries(s.identities.tabs).filter(
+        ([, t]) =>
+          t.key === result.tabKey &&
+          t.windowKey === result.windowKey &&
+          t.url === result.url,
+      );
+      if (candidates.length !== 1)
+        throw Error("标签已关闭或身份已变化，请刷新快照或预览恢复。");
+      const tabId = Number(candidates[0][0]);
+      const tab = await chrome.tabs.get(tabId);
+      if (
+        tab.incognito ||
+        safeUrl(tab.url || tab.pendingUrl, s.settings) !== result.url ||
+        s.identities.windows[String(tab.windowId)] !== result.windowKey
+      )
+        throw Error("标签内容或窗口已变化，未进行定位。请刷新或预览恢复。");
+      const latest = await load();
+      const identity = latest.identities.tabs[String(tabId)];
+      if (
+        latest.identities.browserSession !== s.identities.browserSession ||
+        identity?.key !== result.tabKey ||
+        identity.url !== result.url
+      )
+        throw Error("标签身份已变化，未进行定位。");
+      await chrome.tabs.update(tabId, { active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+      return { tabId, windowId: tab.windowId };
+    }
+    case "SEARCH_PLAN": {
+      const coverage = await searchStatus();
+      const source = await getSearchSource(String(m.sourceId));
+      if (!source.snapshot) throw Error("快照尚未加载，请先加载搜索范围。");
+      const windows = source.snapshot.windows.filter(
+        (w) => !m.windowKey || w.windowKey === m.windowKey,
+      );
+      const tabs = windows
+        .flatMap((w) => w.tabs)
+        .filter(
+          (t) =>
+            (!m.tabKey || t.tabKey === m.tabKey) &&
+            (!m.groupKey || t.groupKey === m.groupKey),
+        );
+      if (!tabs.length || (m.tabKey && m.groupKey))
+        throw Error("所选标签、组或窗口不在此快照中。");
+      const current = await collect();
+      const plan = await makePlan(
+        source.snapshot,
+        current,
+        { tabKeys: tabs.map((t) => t.tabKey) },
+        false,
+        (await load()).settings,
+      );
+      plan.existingWindows = (
+        await chrome.windows.getAll({ windowTypes: ["normal"] })
+      ).filter((w) => !w.incognito).length;
+      if ((await searchStatus()).generation !== coverage.generation)
+        throw Error("搜索范围已变化，请重新选择结果。");
+      plan.searchGeneration = coverage.generation;
+      await chrome.storage.local.set({ restorePlan: plan });
+      return plan;
+    }
     case "PLAN_RESTORE": {
       const current = await collect();
       const plan = await makePlan(
@@ -247,6 +349,11 @@ async function handleInner(m: any) {
         Date.now() - Date.parse(plan.createdAt) > 15 * 60_000
       )
         throw Error("恢复预检已过期，请重新预检");
+      if (
+        plan.searchGeneration !== undefined &&
+        plan.searchGeneration !== (await searchStatus()).generation
+      )
+        throw Error("搜索范围已变化，请重新预检。");
       if (!plan.windows.length) throw Error("没有需要恢复的标签");
       const current = await collect();
       const refreshed = await makePlan(
@@ -305,6 +412,8 @@ async function handleInner(m: any) {
         };
         s.current = undefined;
       });
+      await clearSearch();
+      await chrome.storage.local.remove("restorePlan");
       return true;
     }
     default:

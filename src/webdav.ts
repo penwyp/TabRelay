@@ -191,9 +191,10 @@ export class WebDAVRepository {
   readonly endpoint: string;
   private readonly root: string;
   private readonly timeoutMs: number;
+  private readonly shouldContinue: () => boolean;
   constructor(
     private readonly settings: Settings,
-    options: { timeoutMs?: number } = {},
+    options: { timeoutMs?: number; shouldContinue?: () => boolean } = {},
   ) {
     this.endpoint = normalizeEndpoint(
       settings.endpoint,
@@ -201,6 +202,7 @@ export class WebDAVRepository {
     );
     this.root = `${this.endpoint}tabrelay/v1/`;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT;
+    this.shouldContinue = options.shouldContinue ?? (() => true);
     if (settings.username.includes(":"))
       fail("configuration", "WebDAV 用户名不能包含冒号。");
   }
@@ -215,6 +217,8 @@ export class WebDAVRepository {
       maxBytes?: number;
     } = {},
   ): Promise<{ text: string; etag: string | null; status: number }> {
+    if (!this.shouldContinue())
+      fail("cancelled", "加载已取消，未发送后续请求。");
     const url = new URL(path, this.endpoint);
     if (
       url.origin !== new URL(this.endpoint).origin ||
@@ -351,7 +355,13 @@ export class WebDAVRepository {
     // Read-only check: do not create remote files merely to test credentials.
     await this.directory(this.endpoint);
   }
-  async listDevices(): Promise<Device[]> {
+  async listDevices(
+    onIssue?: (issue: {
+      deviceId: string;
+      code: string;
+      message: string;
+    }) => void,
+  ): Promise<Device[]> {
     let paths: URL[];
     try {
       paths = await this.directory(`${this.root}devices/`);
@@ -360,11 +370,25 @@ export class WebDAVRepository {
       throw error;
     }
     const result: Device[] = [];
+    if (paths.length > 200)
+      onIssue?.({
+        deviceId: "*",
+        code: "limit",
+        message: "设备目录超过200项，仅检查前200项，覆盖范围不完整。",
+      });
     for (const path of paths.slice(0, 200)) {
+      if (!this.shouldContinue()) fail("cancelled", "设备枚举已取消。");
       const deviceId = decodeURIComponent(
         path.pathname.replace(/\/$/, "").split("/").pop()!,
       );
-      if (!SAFE_ID.test(deviceId)) continue;
+      if (!SAFE_ID.test(deviceId)) {
+        onIssue?.({
+          deviceId: "*",
+          code: "invalid-data",
+          message: "设备目录含无效标识，已跳过。",
+        });
+        continue;
+      }
       try {
         const response = await this.request(
           `${this.devicePath(deviceId)}device.json`,
@@ -385,10 +409,24 @@ export class WebDAVRepository {
           !Number.isSafeInteger(data.tabs) ||
           data.tabs < 0 ||
           data.tabs > 10_000
-        )
+        ) {
+          onIssue?.({
+            deviceId,
+            code: "invalid-data",
+            message: "设备元数据无效，未加载此设备。",
+          });
           continue;
+        }
         result.push(data);
       } catch (error) {
+        if (onIssue) {
+          onIssue({
+            deviceId,
+            code: error instanceof WebDAVError ? error.code : "invalid-data",
+            message: "设备元数据读取失败，未加载此设备。",
+          });
+          continue;
+        }
         if (
           error instanceof WebDAVError &&
           !["not-found", "invalid-data", "limit"].includes(error.code)

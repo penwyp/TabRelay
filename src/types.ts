@@ -65,6 +65,7 @@ export type Selection = {
   tabKeys?: string[];
 };
 export type Plan = {
+  searchGeneration?: number;
   id: string;
   snapshot: Snapshot;
   windows: WorkspaceWindow[];

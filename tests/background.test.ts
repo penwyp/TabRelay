@@ -109,7 +109,7 @@ beforeEach(() => {
     },
     runtime: {
       id: "test-extension",
-      getManifest: () => ({ version: "1.1.0" }),
+      getManifest: () => ({ version: "1.2.0" }),
       getURL: (p: string) => "chrome-extension://test-extension/" + p,
       onMessage: {
         addListener: (fn: any) => {

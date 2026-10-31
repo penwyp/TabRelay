@@ -10,6 +10,7 @@ await build({
     "src/sidepanel.ts",
     "src/popup.ts",
     "src/options.ts",
+    "src/search-ui.ts",
   ],
   bundle: true,
   outdir: out,
@@ -22,7 +23,7 @@ await fs.cp("public", out, { recursive: true });
 const manifest = {
   manifest_version: 3,
   name: "TabRelay",
-  version: "1.1.0",
+  version: "1.2.0",
   description:
     "通过 WebDAV 接力多设备标签与标签组，保留本机窗口，安全合并恢复。",
   minimum_chrome_version: "120",

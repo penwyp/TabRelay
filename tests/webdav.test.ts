@@ -361,6 +361,60 @@ describe("WebDAV publication and failure behavior", () => {
       new WebDAVRepository(settings, { timeoutMs: 10 }).connectionTest(),
     ).rejects.toMatchObject({ code: "timeout" });
   });
+  it("stops credentialed metadata enumeration after cancellation", async () => {
+    let enabled = true;
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        requests.push(String(url));
+        if (init.method === "PROPFIND")
+          return new Response(
+            '<d:multistatus xmlns:d="DAV:"><d:response><d:href>/base/tabrelay/v1/devices/device-A/</d:href></d:response><d:response><d:href>/base/tabrelay/v1/devices/device-B/</d:href></d:response></d:multistatus>',
+            { status: 207 },
+          );
+        enabled = false;
+        return new Response(JSON.stringify(device), { status: 200 });
+      }),
+    );
+    await expect(
+      new WebDAVRepository(settings, {
+        shouldContinue: () => enabled,
+      }).listDevices(() => {}),
+    ).rejects.toMatchObject({ code: "cancelled" });
+    expect(requests).toHaveLength(2);
+    expect(requests.some((url) => url.includes("device-B"))).toBe(false);
+  });
+  it("reports corrupt device metadata and enumeration cap for search coverage", async () => {
+    const issues: { deviceId: string; code: string; message: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        if (init.method === "PROPFIND")
+          return new Response(
+            '<d:multistatus xmlns:d="DAV:">' +
+              Array.from(
+                { length: 201 },
+                (_, i) =>
+                  `<d:response><d:href>/base/tabrelay/v1/devices/device-${i}/</d:href></d:response>`,
+              ).join("") +
+              "</d:multistatus>",
+            { status: 207 },
+          );
+        return new Response("invalid-json", { status: 200 });
+      }),
+    );
+    expect(
+      await new WebDAVRepository(settings).listDevices((issue) =>
+        issues.push(issue),
+      ),
+    ).toEqual([]);
+    expect(issues.filter((issue) => issue.code === "limit")).toHaveLength(1);
+    expect(
+      issues.filter((issue) => issue.code === "invalid-data"),
+    ).toHaveLength(200);
+    expect(JSON.stringify(issues)).not.toContain(settings.password);
+  });
   it("handles missing device directory as no devices", async () => {
     vi.stubGlobal(
       "fetch",
