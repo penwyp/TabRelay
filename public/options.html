@@ -16,39 +16,14 @@
           width="36"
           height="36"
           alt=""
-        /><span
-          >TabRelay<span class="brand-caption">WORKSPACE RELAY</span></span
-        >
+        /><span>TabRelay</span>
       </div>
       <span class="settings-page-label">设置</span>
     </header>
-    <main class="options-layout">
-      <aside class="options-intro">
-        <div class="eyebrow">YOUR SPACE. YOUR CONTROL.</div>
-        <h1>连接一次，<br />随处接力。</h1>
-        <p>用自己的 WebDAV 空间，连接不同设备上的浏览器工作区。</p>
-        <div class="options-principles">
-          <div>
-            <span>01</span><strong>设备独立发布</strong>
-            <p>每台设备保留自己的工作区快照。</p>
-          </div>
-          <div>
-            <span>02</span><strong>主动选择恢复</strong>
-            <p>只在你确认后新增窗口，不覆盖已有标签。</p>
-          </div>
-          <div>
-            <span>03</span><strong>数据由你掌控</strong>
-            <p>
-              正文采集默认关闭；仅在授权站点采集可见文字，不同步 Cookie
-              或无痕窗口。
-            </p>
-          </div>
-        </div>
-      </aside>
+    <main class="options-layout" style="display: block; max-width: 720px">
       <section class="options-card" aria-label="同步设置">
         <div class="options-card-heading">
           <h2>同步设置</h2>
-          <p class="muted">仅向你指定的 WebDAV 主机申请访问权限。</p>
         </div>
         <form id="settings-form">
           <fieldset id="settings-fields" disabled>
@@ -67,25 +42,7 @@
                 required
                 type="url"
                 placeholder="https://dav.example.com/remote.php/dav/files/me/"
-                aria-describedby="endpoint-hint"
             /></label>
-            <p id="endpoint-hint" class="field-hint">
-              推荐 HTTPS。TabRelay 会在此目录下创建 tabrelay/v1；不接受 URL
-              中的用户名、密码、查询参数或片段。
-            </p>
-            <div id="http-risk" class="http-risk" hidden>
-              <strong>此连接使用未加密的 HTTP</strong>
-              <p>
-                WebDAV
-                用户名、应用密码及请求会以明文传输，网络中的其他人可能截获或篡改。即使启用快照加密，登录凭据仍不受保护。建议只在可信隔离网络中使用。
-              </p>
-              <p>当前主机：<span id="http-origin"></span></p>
-              <label
-                ><input type="checkbox" id="http-acknowledged" />
-                我了解明文传输风险，仍允许此 HTTP 配置。</label
-              >
-              <p class="field-hint">修改 WebDAV 地址后必须重新确认。</p>
-            </div>
             <div class="field-grid">
               <label class="field"
                 >用户名<input
@@ -121,33 +78,20 @@
             </label>
             <details class="privacy-settings" id="content-settings">
               <summary>正文搜索（默认关闭）</summary>
-              <div class="privacy-note">
-                开启后，将读取你明确授权站点的可见正文，用于跨设备正文搜索。可见文字可能包含商业秘密、聊天或其他敏感信息；请只授权你愿意采集的站点。不采集表单字段、密码框、可编辑区域或无痕页面，不承诺能识别所有敏感文字。
-              </div>
               <label class="toggle-line"
                 ><input
                   id="content-enabled"
                   type="checkbox"
-                />我了解风险，启用以下站点的正文采集</label
+                />启用正文采集</label
               >
               <label class="field"
                 >允许采集的站点（每行一个完整源）<textarea
                   id="content-origins"
                   rows="3"
-                  placeholder="https://docs.example.com&#10;https://wiki.example.com"
-                  aria-describedby="content-origin-hint"
+                  placeholder="https://docs.example.com
+https://wiki.example.com"
                 ></textarea>
               </label>
-              <p id="content-origin-hint" class="field-hint">
-                仅接受明确的 HTTP / HTTPS
-                源（协议＋主机＋可选端口），不允许通配符或路径。点击保存时只申请这些站点及
-                scripting 权限；不会申请所有网站。
-              </p>
-              <p class="field-hint">
-                正文按快照的加密策略保存：设置加密口令后加密；未设置则不加密。远端正文对象最多保留
-                1000
-                个，达到上限停止新增，不自动清理。关闭采集或清空本机搜索缓存，不会删除远端正文或快照。
-              </p>
             </details>
             <details class="privacy-settings">
               <summary>隐私与保留策略</summary>
@@ -155,10 +99,10 @@
                 >不采集的域名<textarea
                   id="blacklist"
                   rows="3"
-                  placeholder="bank.example.com&#10;internal.example.com"
+                  placeholder="bank.example.com
+internal.example.com"
                 ></textarea>
               </label>
-              <p class="field-hint">每行一个域名，同时排除其子域名。</p>
               <label class="field"
                 >移除的 URL 查询参数<input
                   id="strip-params"
@@ -177,17 +121,7 @@
                   autocomplete="new-password"
                   placeholder="所有设备使用相同口令"
               /></label>
-              <p class="field-hint">
-                使用 AES-GCM
-                加密快照。口令保存在本机受信任扩展存储中；遗失后无法读取加密快照。设备名称与同步时间仍为明文。首次成功发布后不可在同一目录更换口令；如需更换，请使用新的
-                WebDAV 目录。
-              </p>
             </details>
-            <div class="privacy-note">
-              标签 URL 可能包含登录令牌等敏感信息。请使用可信
-              WebDAV，并配置需要移除的参数。不会同步
-              Cookie、表单字段或无痕窗口。正文只在上方明确开启并授权站点后采集。
-            </div>
           </fieldset>
           <p
             id="settings-error"
@@ -211,7 +145,6 @@
         </form>
       </section>
     </main>
-    <footer class="options-footer">TabRelay · 浏览器工作区接力</footer>
     <script src="options.js" type="module"></script>
   </body>
 </html>

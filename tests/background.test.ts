@@ -211,6 +211,95 @@ describe("sync coordinator with simulated events/storage and repository", () => 
     );
     expect(store.state.identities.windows).toEqual({});
   });
+  it("records the latest failed attempt independently of an older successful publish, then records retry success", async () => {
+    const { sync } = await import("../src/background");
+    await sync(true);
+    const success = store.state.sync.lastSuccess;
+    expect(store.state.sync.lastAttemptStatus).toBe("success");
+    expect(store.state.sync.lastAttemptFinishedAt).toBe(success);
+    vi.setSystemTime(Date.now() + 60_000);
+    publish.mockImplementationOnce(async () => {
+      expect(store.state.sync.lastAttemptStatus).toBe("running");
+      expect(store.state.sync.lastAttemptFinishedAt).toBeUndefined();
+      expect(store.state.sync.lastAttemptError).toBeUndefined();
+      throw Error("latest attempt offline");
+    });
+    await sync(true);
+    const failedAt = store.state.sync.lastAttempt;
+    expect(Date.parse(failedAt)).toBeGreaterThan(Date.parse(success));
+    expect(store.state.sync.lastAttemptStatus).toBe("failed");
+    expect(store.state.sync.lastAttemptError).toContain(
+      "latest attempt offline",
+    );
+    expect(
+      Date.parse(store.state.sync.lastAttemptFinishedAt),
+    ).toBeGreaterThanOrEqual(Date.parse(failedAt));
+    expect(store.state.sync.lastSuccess).toBe(success);
+    vi.setSystemTime(Date.now() + 60_000);
+    await sync(true);
+    expect(store.state.sync.lastAttemptStatus).toBe("success");
+    expect(store.state.sync.lastAttemptError).toBeUndefined();
+    expect(store.state.sync.lastAttemptFinishedAt).toBe(
+      store.state.sync.lastSuccess,
+    );
+    expect(Date.parse(store.state.sync.lastSuccess)).toBeGreaterThan(
+      Date.parse(failedAt),
+    );
+  });
+  it("reports unchanged reconciliation without inventing a new successful publish time", async () => {
+    const { sync } = await import("../src/background");
+    await sync(true);
+    const success = store.state.sync.lastSuccess;
+    store.state.sync.dirty = true;
+    vi.setSystemTime(store.state.sync.nextDueAt + 1);
+    await sync(false);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(store.state.sync.lastAttemptStatus).toBe("unchanged");
+    expect(store.state.sync.lastSuccess).toBe(success);
+    expect(Date.parse(store.state.sync.lastAttemptFinishedAt)).toBeGreaterThan(
+      Date.parse(success),
+    );
+  });
+  it("clears old endpoint attempt and successful-publish history when switching repositories", async () => {
+    store.state.sync.lastAttempt = "2026-10-31T01:00:00Z";
+    store.state.sync.lastAttemptStatus = "failed";
+    store.state.sync.lastAttemptFinishedAt = "2026-10-31T01:00:01Z";
+    store.state.sync.lastAttemptError = "old endpoint error";
+    store.state.sync.lastSuccess = "2026-10-31T00:00:00Z";
+    store.state.sync.error = "old endpoint error";
+    store.state.sync.errorCode = "network";
+    await import("../src/background");
+    const result = await send({
+      type: "SAVE_SETTINGS",
+      settings: {
+        ...store.state.settings,
+        endpoint: "https://new-repository.example.org/",
+        enabled: false,
+      },
+    });
+    expect(result.ok).toBe(true);
+    for (const field of [
+      "lastAttempt",
+      "lastAttemptStatus",
+      "lastAttemptFinishedAt",
+      "lastAttemptError",
+      "lastSuccess",
+      "error",
+      "errorCode",
+    ])
+      expect(store.state.sync[field], field).toBeUndefined();
+  });
+  it("marks a worker-interrupted running attempt as interrupted, never stale success", async () => {
+    store.state.sync.lastAttempt = "2026-10-31T01:00:00Z";
+    store.state.sync.lastSuccess = "2026-10-31T00:00:00Z";
+    store.state.sync.lastAttemptStatus = "running";
+    await import("../src/background");
+    await send({ type: "GET_STATE" });
+    expect(store.state.sync.lastAttemptStatus).toBe("interrupted");
+    expect(store.state.sync.lastAttemptError).toContain("中断");
+    expect(store.state.sync.lastSuccess).toBe("2026-10-31T00:00:00Z");
+    expect(store.state.sync.lastAttemptFinishedAt).toEqual(expect.any(String));
+  });
   it("durably stores pending version before network and advances revision only after success", async () => {
     const { sync } = await import("../src/background");
     publish.mockImplementation(async (s: Snapshot) => {

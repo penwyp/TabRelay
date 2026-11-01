@@ -23,7 +23,7 @@ await fs.cp("public", out, { recursive: true });
 const manifest = {
   manifest_version: 3,
   name: "TabRelay",
-  version: "2.0.0",
+  version: "2.1.0",
   description:
     "通过 WebDAV 接力多设备标签与标签组，保留本机窗口，安全合并恢复。",
   minimum_chrome_version: "120",

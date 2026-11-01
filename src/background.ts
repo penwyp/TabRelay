@@ -63,6 +63,28 @@ const ready = (async () => {
       startupUntil = Date.now() + 10_000;
     }
   });
+  await update((s) => {
+    if (
+      !s.sync.lastAttemptStatus &&
+      (s.sync.lastAttempt || s.sync.lastSuccess)
+    ) {
+      s.sync.lastAttempt ||= s.sync.lastSuccess;
+      s.sync.lastAttemptStatus = s.sync.error
+        ? "failed"
+        : s.sync.lastSuccess &&
+            Date.parse(s.sync.lastSuccess) >= Date.parse(s.sync.lastAttempt!)
+          ? "success"
+          : "interrupted";
+      s.sync.lastAttemptError = s.sync.error;
+      if (s.sync.lastAttemptStatus === "success")
+        s.sync.lastAttemptFinishedAt = s.sync.lastSuccess;
+    }
+    if (s.sync.lastAttemptStatus === "running") {
+      s.sync.lastAttemptStatus = "interrupted";
+      s.sync.lastAttemptFinishedAt = new Date().toISOString();
+      s.sync.lastAttemptError = "同步已中断";
+    }
+  });
   await interruptOnBoot();
   await chrome.alarms.create("tabrelay-reconcile", { periodInMinutes: 0.5 });
   await update((s) => {
@@ -93,6 +115,9 @@ export async function sync(force = false, followPendingWithCurrent = true) {
     if (!force && !s.sync.dirty && !s.settings.contentEnabled) return;
     await update((x) => {
       x.sync.lastAttempt = new Date().toISOString();
+      x.sync.lastAttemptStatus = "running";
+      x.sync.lastAttemptFinishedAt = undefined;
+      x.sync.lastAttemptError = undefined;
       x.sync.nextDueAt =
         Date.now() + (x.settings.syncIntervalMinutes || 10) * 60000;
     });
@@ -111,6 +136,9 @@ export async function sync(force = false, followPendingWithCurrent = true) {
     });
     if (!force && !retrying && digest === s.sync.lastHash) {
       await update((x) => {
+        x.sync.lastAttemptStatus = "unchanged";
+        x.sync.lastAttemptFinishedAt = new Date().toISOString();
+        x.sync.lastAttemptError = undefined;
         if (x.sync.generation === generation) {
           x.sync.dirty = false;
           if (
@@ -143,6 +171,9 @@ export async function sync(force = false, followPendingWithCurrent = true) {
       x.sync.etag = r.etag;
       x.sync.lastHash = digest;
       x.sync.lastSuccess = new Date().toISOString();
+      x.sync.lastAttemptStatus = "success";
+      x.sync.lastAttemptFinishedAt = x.sync.lastSuccess;
+      x.sync.lastAttemptError = undefined;
       x.sync.error = undefined;
       x.sync.errorCode = undefined;
       x.sync.pending = undefined;
@@ -160,6 +191,9 @@ export async function sync(force = false, followPendingWithCurrent = true) {
   } catch (e) {
     await update((s) => {
       s.sync.error = safeError(e);
+      s.sync.lastAttemptStatus = "failed";
+      s.sync.lastAttemptFinishedAt = new Date().toISOString();
+      s.sync.lastAttemptError = s.sync.error;
       s.sync.errorCode = (e as any)?.code || "network";
       s.sync.retryCount++;
       s.sync.dirty = true;
@@ -269,6 +303,13 @@ async function handleInner(m: any) {
         if (changed) s.contentObjectEndpoint = undefined;
         s.settings = settings;
         if (changed) {
+          s.sync.lastAttempt = undefined;
+          s.sync.lastAttemptStatus = undefined;
+          s.sync.lastAttemptFinishedAt = undefined;
+          s.sync.lastAttemptError = undefined;
+          s.sync.lastSuccess = undefined;
+          s.sync.error = undefined;
+          s.sync.errorCode = undefined;
           s.sync.etag = undefined;
           s.sync.lastHash = undefined;
           s.sync.pending = undefined;

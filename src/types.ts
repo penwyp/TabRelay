@@ -149,6 +149,10 @@ export type RuntimeIdentity = {
 export type SyncState = {
   nextDueAt?: number;
   lastAttempt?: string;
+  lastAttemptStatus?:
+    "running" | "success" | "failed" | "unchanged" | "interrupted";
+  lastAttemptFinishedAt?: string;
+  lastAttemptError?: string;
   dirty: boolean;
   generation: number;
   revision: number;

@@ -349,6 +349,8 @@ try {
     await popup.setViewportSize({ width: 600, height: 600 });
     await popup.goto(`chrome-extension://${a.id}/popup.html`);
     await popup.locator("#search-query").waitFor();
+    assert.equal(await popup.locator("#sync-home").isVisible(), true);
+    assert.equal(await popup.locator(".search-result").count(), 0);
     assert.equal(
       await popup.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -394,23 +396,12 @@ try {
     assert.equal(icons.dimensions.length, 4);
     assert.ok(icons.action[16] && icons.action[32]);
   });
-  await test("HTTP settings require explicit consent and HTTPS saves without insecure warning", async () => {
+  await test("HTTP settings save and test directly with exact selected origin while HTTPS needs no warning", async () => {
     await optionsPage.locator("#endpoint").fill(dav.endpoint);
     await optionsPage.locator("#device-name").fill("工作电脑 A");
     await optionsPage.locator("#enabled").uncheck();
-    assert.equal(await optionsPage.locator("#http-risk").isVisible(), true);
-    assert.equal(
-      await optionsPage.locator("#http-acknowledged").isChecked(),
-      false,
-    );
-    await optionsPage.locator("#save-settings").click();
-    await eventually(async () =>
-      (await optionsPage.locator("#settings-error").textContent()).includes(
-        "明确勾选",
-      ),
-    );
-    assert.equal((await a.call({ type: "GET_STATE" })).settings.endpoint, "");
-    await optionsPage.locator("#http-acknowledged").check();
+    assert.equal(await optionsPage.locator("#http-risk").count(), 0);
+    assert.equal(await optionsPage.locator("#http-acknowledged").count(), 0);
     await optionsPage.locator("#save-settings").click();
     await eventually(async () =>
       (await optionsPage.locator("#settings-error").textContent()).includes(
@@ -418,32 +409,21 @@ try {
       ),
     );
     let state = await a.call({ type: "GET_STATE" });
+    assert.equal(state.settings.endpoint, dav.endpoint);
     assert.equal(state.settings.httpAcknowledgedOrigin, dav.origin);
     assert.equal(state.settings.enabled, false);
-    await optionsPage.screenshot({
-      path: "evidence/screenshots/05-http-settings-consent.png",
-      fullPage: true,
-    });
-    await optionsPage
-      .locator("#endpoint")
-      .fill(dav.endpoint.replace("127.0.0.1", "localhost"));
-    assert.equal(
-      await optionsPage.locator("#http-acknowledged").isChecked(),
-      false,
-    );
-    await optionsPage.locator("#save-settings").click();
+    await optionsPage.locator("#test-connection").click();
     await eventually(async () =>
       (await optionsPage.locator("#settings-error").textContent()).includes(
-        "明确勾选",
+        "连接成功",
       ),
     );
-    assert.equal(
-      (await a.call({ type: "GET_STATE" })).settings.endpoint,
-      dav.endpoint,
-    );
+    await optionsPage.screenshot({
+      path: "evidence/screenshots/05-http-settings-direct.png",
+      fullPage: true,
+    });
     const httpsEndpoint = dav.endpoint.replace("http:", "https:");
     await optionsPage.locator("#endpoint").fill(httpsEndpoint);
-    assert.equal(await optionsPage.locator("#http-risk").isVisible(), false);
     await optionsPage.locator("#save-settings").click();
     await eventually(async () =>
       (await optionsPage.locator("#settings-error").textContent()).includes(
@@ -453,6 +433,7 @@ try {
     state = await a.call({ type: "GET_STATE" });
     assert.equal(state.settings.endpoint, httpsEndpoint);
     assert.equal(state.settings.enabled, false);
+    assert.equal(state.settings.httpAcknowledgedOrigin, undefined);
     await optionsPage.screenshot({
       path: "evidence/screenshots/06-https-settings.png",
       fullPage: true,
@@ -1268,6 +1249,7 @@ try {
       requestCount,
       "Paused popup must not implicitly refill from WebDAV",
     );
+    await searchPage.locator("#search-query").fill("资源成本治理");
     await searchPage.locator("#rebuild-cache").click();
     await waitSearch();
     assert.ok((await querySearch("资源成本治理")).total >= 1);
@@ -1520,6 +1502,51 @@ try {
       path: "evidence/screenshots/10-body-chinese-search.png",
       fullPage: true,
     });
+    // Delay delivery of a genuine backend query to exercise clear-input races.
+    await popup.evaluate(() => {
+      const original = chrome.runtime.sendMessage.bind(chrome.runtime);
+      window.__restoreSendMessage = () => {
+        chrome.runtime.sendMessage = original;
+      };
+      window.__delayedSearch = 0;
+      chrome.runtime.sendMessage = (...args) => {
+        const pending = original(...args);
+        if (args[0]?.type === "SEARCH_QUERY" && args[0]?.query) {
+          window.__delayedSearch++;
+          return pending.then(
+            (value) =>
+              new Promise((resolve) => setTimeout(() => resolve(value), 500)),
+          );
+        }
+        return pending;
+      };
+    });
+    await popup.locator("#search-query").fill("sapphire-resonator-protocol");
+    await eventually(() => popup.evaluate(() => window.__delayedSearch > 0));
+    await popup.locator("#search-query").fill("");
+    assert.equal(await popup.locator("#sync-home").isVisible(), true);
+    assert.equal(await popup.locator(".search-result").count(), 0);
+    await delay(750);
+    assert.equal(
+      await popup.locator(".search-result").count(),
+      0,
+      "Late response must not repopulate cleared search",
+    );
+    assert.equal(await popup.locator(".result-url").count(), 0);
+    assert.equal(await popup.locator(".result-snippet").count(), 0);
+    assert.equal(
+      await popup
+        .locator("body")
+        .evaluate((element) => element.classList.contains("search-active")),
+      false,
+    );
+    assert.equal(
+      (await popup.locator("body").innerText()).includes(
+        "sapphire-resonator-protocol",
+      ),
+      false,
+    );
+    await popup.evaluate(() => window.__restoreSendMessage());
     // Repeated unchanged content is content-addressed, not a new raw body per snapshot.
     const beforeObjects = [...dav.files.keys()].filter((key) =>
       key.includes(`/devices/${bodyState.deviceId}/objects/text/`),
@@ -1867,6 +1894,117 @@ try {
     await popup.screenshot({
       path: "evidence/screenshots/11-popup-restored-journal.png",
       fullPage: true,
+    });
+  });
+  await test("Popup homepage reports latest success failure and retry without showing empty-query history", async () => {
+    const h = await browser("H-status-home");
+    const local = await h.context.newPage();
+    await local.goto(dav.origin + "/fixture/status-private-history");
+    const configuredState = await configured(
+      h,
+      "状态验证",
+      dav.origin + "/dav/status-home/",
+    );
+    const popup = await h.context.newPage();
+    await popup.setViewportSize({ width: 600, height: 600 });
+    await popup.goto(`chrome-extension://${h.id}/popup.html`);
+    await popup.locator("#sync-home").waitFor();
+    await eventually(async () =>
+      (await popup.locator("#sync-outcome").textContent()).includes("成功"),
+    );
+    assert.equal(await popup.locator("#search-query").inputValue(), "");
+    assert.equal(await popup.locator(".search-result").count(), 0);
+    assert.equal(
+      (await popup.locator("body").innerText()).includes(
+        "status-private-history",
+      ),
+      false,
+    );
+    assert.ok((await popup.locator("#sync-attempt-time").textContent()).trim());
+    await popup.screenshot({
+      path: "evidence/screenshots/14-sync-home-success.png",
+      fullPage: false,
+    });
+    const oldSuccess = configuredState.sync.lastSuccess;
+    dav.faults.status = 401;
+    await h.call({ type: "SYNC_NOW" });
+    const failed = await eventually(async () => {
+      const state = await h.call({ type: "GET_STATE" });
+      return state.sync.lastAttemptStatus === "failed" ? state : false;
+    });
+    assert.equal(failed.sync.lastSuccess, oldSuccess);
+    assert.ok(Date.parse(failed.sync.lastAttempt) >= Date.parse(oldSuccess));
+    await popup.bringToFront();
+    await eventually(async () =>
+      (await popup.locator("#sync-outcome").textContent()).includes("失败"),
+    );
+    assert.equal(
+      await popup.locator("#sync-home").getAttribute("data-status"),
+      "failed",
+    );
+    const expectedAttemptTime = await popup.evaluate(
+      (iso) =>
+        new Intl.DateTimeFormat("zh-CN", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        }).format(new Date(iso)),
+      failed.sync.lastAttemptFinishedAt,
+    );
+    assert.equal(
+      (await popup.locator("#sync-attempt-time").textContent()).trim(),
+      expectedAttemptTime,
+      "Homepage time must belong to the latest failed attempt, not the older success",
+    );
+    assert.equal(await popup.locator("#sync-home-error").isVisible(), true);
+    assert.ok((await popup.locator("#sync-home-error").textContent()).trim());
+    await popup.screenshot({
+      path: "evidence/screenshots/15-sync-home-latest-failure.png",
+      fullPage: false,
+    });
+    dav.faults.status = 0;
+    await synced(h);
+    const retried = await h.call({ type: "GET_STATE" });
+    assert.equal(retried.sync.lastAttemptStatus, "success");
+    assert.equal(retried.sync.lastAttemptError, undefined);
+    await eventually(async () =>
+      (await popup.locator("#sync-outcome").textContent()).includes("成功"),
+    );
+    assert.equal(await popup.locator("#sync-home-error").isVisible(), false);
+    // Seed a current permission-error journal state to exercise rendering;
+    // production permission-removal behavior is separately covered by unit tests.
+    await h.page.evaluate(async () => {
+      const { state } = await chrome.storage.local.get("state");
+      state.sync.error = "测试：浏览器权限已撤销";
+      state.sync.errorCode = "permission-denied";
+      state.settings.enabled = false;
+      await chrome.storage.local.set({ state });
+    });
+    await eventually(async () =>
+      (await popup.locator("#sync-home-error").textContent()).includes(
+        "当前异常：",
+      ),
+    );
+    assert.ok(
+      (await popup.locator("#sync-outcome").textContent()).includes("成功"),
+      "Past successful attempt remains accurately labeled",
+    );
+    assert.equal(await popup.locator("#sync-home-error").isVisible(), true);
+    assert.equal(
+      await popup.locator("#workbench-sync").isDisabled(),
+      true,
+      "Paused sync must not offer a no-op manual sync button",
+    );
+    await h.page.evaluate(async () => {
+      const { state } = await chrome.storage.local.get("state");
+      delete state.sync.error;
+      delete state.sync.errorCode;
+      state.settings.enabled = true;
+      await chrome.storage.local.set({ state });
     });
   });
   console.log(`All ${results.length} real-browser E2E scenarios passed.`);

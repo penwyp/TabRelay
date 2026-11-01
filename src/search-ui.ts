@@ -118,7 +118,9 @@ async function request<T>(message: Record<string, unknown>): Promise<T> {
 function message(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败，请重试。";
 }
-function notice(value: string, error = false) {
+function notice(value: string, error = false, scope = "action") {
+  if (scope === "search" && !input("search-query").value.trim()) return;
+  $("search-notice").dataset.scope = scope;
   $("search-notice").dataset.kind = error ? "error" : "action";
   text("search-notice", value);
   $("search-notice").classList.toggle("error", error);
@@ -132,6 +134,7 @@ function date(value?: string): string {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
     hour12: false,
   }).format(new Date(value));
 }
@@ -147,8 +150,14 @@ function invalidateView(reason?: string) {
     "索引已更新",
     "请以当前已加载范围重新查询。旧结果与恢复预览已失效。",
   );
-  if (reason) {
-    notice(reason);
+  if (reason && input("search-query").value.trim()) {
+    notice(
+      reason === "搜索索引已更新，旧结果和恢复预览已清除。"
+        ? "索引已更新"
+        : reason,
+      false,
+      "search",
+    );
     $("search-notice").dataset.kind =
       reason === "搜索索引已更新，旧结果和恢复预览已清除。"
         ? "index-update"
@@ -156,6 +165,11 @@ function invalidateView(reason?: string) {
   }
 }
 function renderEmpty(title: string, detail: string) {
+  if (!input("search-query").value.trim()) {
+    $("search-results").replaceChildren();
+    return;
+  }
+  if (document.body.classList.contains("popup-workbench")) detail = "";
   const box = node("div", "search-empty");
   box.append(
     node("span", undefined, "⌕"),
@@ -269,8 +283,8 @@ function renderCoverage(value: Coverage) {
   text(
     "coverage-observed",
     value.earliestObservedAt
-      ? `最早已加载快照：${date(value.earliestObservedAt)}。这是快照观察时间，不是访问时间。`
-      : "快照记录时间不代表网页访问时间。",
+      ? `最早已加载快照：${date(value.earliestObservedAt)}。`
+      : "",
   );
   text(
     "coverage-updated",
@@ -293,15 +307,15 @@ function renderCoverage(value: Coverage) {
       : undefined,
   ].filter(Boolean);
   const bodyWarning = partialBody
-    ? `正文已载 ${value.bodyLoaded || 0} · 不可用 ${value.bodyMissing || 0} · 截断 ${value.bodyTruncated || 0}；标题/网址仍可搜。`
+    ? `正文已载 ${value.bodyLoaded || 0} · 不可用 ${value.bodyMissing || 0} · 截断 ${value.bodyTruncated || 0}`
     : undefined;
   const popupWarnings = [
     bodyWarning,
     value.error,
-    value.paused ? "自动构建已暂停；点击“重建搜索缓存”继续。" : undefined,
-    value.truncated ? "已达加载上限，覆盖不完整。" : undefined,
+    value.paused ? "自动构建已暂停" : undefined,
+    value.truncated ? "已达加载上限" : undefined,
     failed.length || retainedErrors.length
-      ? "部分来源失败或沿用旧缓存，详见范围详情。"
+      ? "部分来源失败 / 旧缓存"
       : undefined,
   ].filter(Boolean);
   text(
@@ -364,7 +378,7 @@ function renderCoverage(value: Coverage) {
   }
   text(
     "body-coverage",
-    `正文覆盖：已加载 ${value.bodyLoaded || 0} · 不可用 ${value.bodyMissing || 0} · 已截断 ${value.bodyTruncated || 0}。${contentCaptureSummary} 正文未采集不影响标题、网址或标签恢复。`,
+    `正文覆盖：已加载 ${value.bodyLoaded || 0} · 不可用 ${value.bodyMissing || 0} · 已截断 ${value.bodyTruncated || 0}。${contentCaptureSummary}`,
   );
   const deviceFilter = $<HTMLSelectElement>("filter-device");
   const selected = deviceFilter.value;
@@ -408,7 +422,7 @@ async function refreshStatus() {
   try {
     renderCoverage(await request<Coverage>({ type: "SEARCH_STATUS" }));
   } catch (error) {
-    notice(message(error), true);
+    notice(message(error), true, "search");
   } finally {
     statusPending = false;
   }
@@ -485,7 +499,31 @@ function highlight(target: HTMLElement, value: string, query: string) {
   }
   target.append(document.createTextNode(value.slice(offset)));
 }
+function updateSearchMode(): boolean {
+  const active = Boolean(input("search-query").value.trim());
+  document.body.classList.toggle("search-active", active);
+  const home = document.getElementById("sync-home");
+  if (home) home.hidden = active;
+  if (!active) {
+    ++querySequence;
+    shownResults = [];
+    occurrenceSelections.clear();
+    plan = undefined;
+    planGeneration = undefined;
+    $<HTMLDialogElement>("search-restore-dialog").close();
+    $("search-results").replaceChildren();
+    $("search-results").classList.remove("search-busy");
+    text("result-count", "");
+    if (
+      $("search-notice").dataset.scope === "search" ||
+      $("search-notice").dataset.kind !== "error"
+    )
+      show("search-notice", false);
+  }
+  return active;
+}
 async function runQuery() {
+  if (!updateSearchMode()) return;
   const sequence = ++querySequence;
   if (!status?.sources.some((source) => source.status === "loaded")) {
     text("result-count", "");
@@ -500,7 +538,7 @@ async function runQuery() {
     return;
   }
   const generation = status.generation;
-  const query = input("search-query").value;
+  const query = input("search-query").value.trim();
   const limit = Number($<HTMLSelectElement>("result-limit").value);
   try {
     const filters = getFilters();
@@ -512,6 +550,8 @@ async function runQuery() {
       limit,
     });
     if (
+      !input("search-query").value.trim() ||
+      input("search-query").value.trim() !== query ||
       sequence !== querySequence ||
       generation !== status?.generation ||
       response.coverage.generation !== generation
@@ -524,7 +564,7 @@ async function runQuery() {
       shownResults = [];
       text("result-count", "");
       renderEmpty("搜索未完成", message(error));
-      notice(message(error), true);
+      notice(message(error), true, "search");
     }
   } finally {
     if (sequence === querySequence)
@@ -533,6 +573,7 @@ async function runQuery() {
 }
 function scheduleQuery() {
   clearTimeout(debounce);
+  if (!updateSearchMode()) return;
   ++querySequence;
   debounce = setTimeout(() => {
     void automaticSearch();
@@ -555,6 +596,7 @@ function contentLabel(value?: string): string {
   return value ? labels[value] || value : "没有已加载正文";
 }
 function renderResults(response: QueryResponse, query: string) {
+  if (!query.trim() || input("search-query").value.trim() !== query) return;
   if ($("search-notice").dataset.kind === "index-update")
     show("search-notice", false);
   const loaded = response.coverage.sources.filter(
@@ -746,6 +788,7 @@ async function previewResult(
   planning = true;
   disableResultActions(true);
   const generation = status.generation;
+  const requestedQuery = input("search-query").value.trim();
   try {
     const response = await request<Plan>({
       type: "SEARCH_PLAN",
@@ -757,6 +800,11 @@ async function previewResult(
           ? { groupKey: result.groupKey }
           : {}),
     });
+    if (
+      !requestedQuery ||
+      input("search-query").value.trim() !== requestedQuery
+    )
+      return;
     if (status?.generation !== generation)
       throw new Error("索引已变化，请重新搜索后预览恢复。");
     presentPlan(
@@ -784,7 +832,7 @@ function presentPlan(
   );
   text(
     "search-plan-time",
-    `固定快照时间：${date(response.snapshot.capturedAt)}。这是快照观察时间，不是访问时间。`,
+    `固定快照时间：${date(response.snapshot.capturedAt)}。`,
   );
   const stats = $("search-plan-stats");
   stats.replaceChildren();
@@ -842,9 +890,7 @@ async function startRestore() {
     $<HTMLDialogElement>("search-restore-dialog").close();
     plan = undefined;
     void refreshWorkbenchState();
-    notice(
-      "恢复任务已开始。下方可查看进度并停止后续创建；关闭弹窗不影响后台任务，重开后可继续查看。",
-    );
+    notice("恢复已开始");
   } catch (error) {
     notice(message(error), true);
   } finally {
@@ -860,7 +906,7 @@ async function automaticSearch() {
     const value = await request<Coverage>({ type: "SEARCH_AUTO" });
     if (epoch === actionEpoch && value?.sources) renderCoverage(value);
   } catch (error) {
-    if (epoch === actionEpoch) notice(message(error), true);
+    if (epoch === actionEpoch) notice(message(error), true, "search");
   } finally {
     automaticPending = false;
   }
@@ -877,7 +923,7 @@ async function loadSnapshots(rebuild = false) {
       includeHistory: true,
     });
   } catch (error) {
-    notice(message(error), true);
+    notice(message(error), true, "search");
   } finally {
     loadRequested = false;
     await refreshStatus();
@@ -893,14 +939,11 @@ async function cacheAction(type: "SEARCH_CANCEL" | "SEARCH_CLEAR") {
   busy("cancel-load", true);
   try {
     await request({ type });
-    if (type === "SEARCH_CLEAR")
-      invalidateView(
-        "本机搜索缓存已清空并暂停自动构建。远端正文、快照和浏览器标签均未删除；请明确点击重建后继续。",
-      );
-    else notice("自动构建已暂停，已加载的部分仍可搜索。点击重建后继续。");
+    if (type === "SEARCH_CLEAR") invalidateView("本机搜索缓存已清空");
+    else notice("自动构建已暂停");
     await refreshStatus();
   } catch (error) {
-    notice(message(error), true);
+    notice(message(error), true, "search");
   } finally {
     actionPending = false;
     busy("clear-cache", false);
@@ -931,6 +974,61 @@ async function refreshWorkbenchState() {
     const changed = deviceId !== value.deviceId;
     deviceId = value.deviceId;
     const sync = value.sync;
+    const home = document.getElementById("sync-home");
+    if (home) {
+      const outcome = sync.lastAttemptStatus;
+      const failed =
+        outcome === "failed" ||
+        outcome === "interrupted" ||
+        (!outcome && Boolean(sync.error));
+      home.dataset.status = failed ? "failed" : outcome || "idle";
+      const labels: Record<string, string> = {
+        running: "正在同步",
+        success: "同步成功",
+        failed: "同步失败",
+        unchanged: "同步完成 · 无变化",
+        interrupted: "同步已中断",
+      };
+      text(
+        "sync-outcome",
+        outcome
+          ? labels[outcome] || "等待同步"
+          : sync.error
+            ? "同步失败"
+            : !value.settings.endpoint
+              ? "尚未配置"
+              : "等待同步",
+      );
+      text(
+        "sync-attempt-time",
+        sync.lastAttemptFinishedAt && outcome !== "running"
+          ? date(sync.lastAttemptFinishedAt)
+          : sync.lastAttempt
+            ? date(sync.lastAttempt)
+            : "尚无同步记录",
+      );
+      text(
+        "sync-last-success",
+        sync.lastSuccess
+          ? `上次成功发布 ${date(sync.lastSuccess)}`
+          : "尚未成功发布",
+      );
+      text(
+        "sync-home-next",
+        value.settings.enabled && sync.nextDueAt
+          ? `下次同步 ${date(new Date(sync.nextDueAt).toISOString())}`
+          : "自动同步已暂停",
+      );
+      text(
+        "sync-home-error",
+        failed
+          ? sync.lastAttemptError || sync.error || "同步未完成"
+          : sync.error
+            ? `当前异常：${sync.error}`
+            : "",
+      );
+      show("sync-home-error", failed || Boolean(sync.error));
+    }
     const settings = value.settings;
     const syncLabel = sync.error
       ? `同步异常：${sync.error}`
@@ -956,7 +1054,10 @@ async function refreshWorkbenchState() {
     );
     busy(
       "workbench-sync",
-      syncBusy || !settings.endpoint || Boolean(sync.pausedConflict),
+      syncBusy ||
+        !settings.enabled ||
+        !settings.endpoint ||
+        Boolean(sync.pausedConflict),
     );
     const syncAlert = document.getElementById("workbench-sync-alert");
     if (syncAlert) {
@@ -969,13 +1070,12 @@ async function refreshWorkbenchState() {
     }
     const capture = value.contentCapture;
     contentCaptureSummary = capture
-      ? `本机采样 ${capture.sampled} · 跳过 ${capture.skipped} · 失败 ${capture.failed} · 待采样 ${capture.remaining}；此设备远端正文对象（上次同步观察）${capture.objectCount ?? "未知"}/${capture.limit || 1000}。${(capture.objectCount ?? 0) >= 900 ? "已接近上限；清空本机缓存不会释放 WebDAV 空间。" : ""}`
-      : "正文采集默认关闭，只有明确授权的站点才可采集。";
+      ? `本机采样 ${capture.sampled} · 跳过 ${capture.skipped} · 失败 ${capture.failed} · 待采样 ${capture.remaining}；此设备远端正文对象（上次同步观察）${capture.objectCount ?? "未知"}/${capture.limit || 1000}。${(capture.objectCount ?? 0) >= 900 ? "接近上限" : ""}`
+      : "正文采集未开启";
     const capacityWarning = document.getElementById("body-limit-warning");
     if (capacityWarning) {
       capacityWarning.hidden = (capture?.objectCount ?? 0) < 900;
-      capacityWarning.textContent =
-        "远端正文接近 1000 个上限；清空本机缓存不会释放 WebDAV 空间。";
+      capacityWarning.textContent = "远端正文接近 1000 个上限";
     }
     if (status)
       text(
@@ -1111,18 +1211,22 @@ $("workbench-settings").addEventListener("click", () => {
     .catch((error) => notice(message(error), true));
 });
 $("workbench-sync").addEventListener("click", async () => {
-  if (syncBusy) return;
+  if (syncBusy || !localState?.settings.enabled) return;
   syncBusy = true;
   busy("workbench-sync", true);
   try {
     await request({ type: "SYNC_NOW" });
     await refreshWorkbenchState();
-    notice("同步已执行，请查看本机状态。");
   } catch (error) {
     notice(message(error), true);
   } finally {
     syncBusy = false;
-    busy("workbench-sync", !localState?.settings.endpoint);
+    busy(
+      "workbench-sync",
+      !localState?.settings.enabled ||
+        !localState?.settings.endpoint ||
+        Boolean(localState?.sync.pausedConflict),
+    );
   }
 });
 $("device-workspaces").addEventListener("toggle", () => {
@@ -1200,6 +1304,7 @@ $("search-confirm-restore").addEventListener("click", () => {
 $<HTMLDialogElement>("search-restore-dialog").addEventListener("cancel", () => {
   plan = undefined;
 });
+updateSearchMode();
 void refreshWorkbenchState();
 void refreshStatus().then(() => automaticSearch());
 setInterval(() => {

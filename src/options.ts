@@ -35,14 +35,6 @@ function endpointUrl(): URL | undefined {
     return undefined;
   }
 }
-function updateHttpWarning(resetConsent: boolean) {
-  if (resetConsent) input("http-acknowledged").checked = false;
-  const endpoint = endpointUrl();
-  const isHttp = endpoint?.protocol === "http:";
-  $("http-risk").hidden = !isHttp;
-  $("http-origin").textContent = isHttp ? endpoint.origin : "";
-  if (!isHttp) input("http-acknowledged").checked = false;
-}
 function readSettings(): ConnectionSettings {
   const endpoint = input("endpoint").value.trim();
   const parsed = endpointUrl();
@@ -57,9 +49,6 @@ function readSettings(): ConnectionSettings {
     throw new Error(
       "请使用不含用户名、密码、查询参数或片段的 HTTP 或 HTTPS WebDAV 地址。",
     );
-  }
-  if (parsed.protocol === "http:" && !input("http-acknowledged").checked) {
-    throw new Error("使用 HTTP 前，请阅读并明确勾选此配置的明文传输风险确认。");
   }
   const deviceName = input("device-name").value.trim();
   if (!deviceName) throw new Error("请输入设备名称。");
@@ -159,11 +148,7 @@ async function applySettings(testOnly: boolean) {
       type: testOnly ? "TEST_CONNECTION" : "SAVE_SETTINGS",
       settings,
     });
-    feedback(
-      testOnly
-        ? "连接成功。确认配置后，点击保存设置。"
-        : "设置已保存。可以关闭此标签页，点击工具栏图标继续接力。",
-    );
+    feedback(testOnly ? "连接成功" : "设置已保存");
   } catch (error) {
     feedback(errorMessage(error), true);
   } finally {
@@ -190,10 +175,6 @@ async function loadSettings() {
     input("strip-params").value = settings.stripParams.join(", ");
     input("history-limit").value = String(settings.historyLimit);
     input("encryption-passphrase").value = settings.encryptionPassphrase;
-    updateHttpWarning(false);
-    input("http-acknowledged").checked =
-      endpointUrl()?.protocol === "http:" &&
-      settings.httpAcknowledgedOrigin === endpointUrl()?.origin;
     loaded = true;
   } catch (error) {
     feedback(errorMessage(error), true);
@@ -201,8 +182,6 @@ async function loadSettings() {
     setBusy(false);
   }
 }
-input("endpoint").addEventListener("input", () => updateHttpWarning(true));
-input("endpoint").addEventListener("change", () => updateHttpWarning(true));
 $("settings-form").addEventListener("submit", (event) => {
   event.preventDefault();
   void applySettings(false);
