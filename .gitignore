@@ -7,3 +7,4 @@ test-results/
 *.key
 .e2e-profiles/
 dist-test/
+.DS_Store
